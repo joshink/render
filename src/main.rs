@@ -285,18 +285,40 @@ fn main() {
         info!("Rendering video movie: {} frames at {} FPS ({} seconds)...", num_frames, fps, duration);
 
         let save_start_inst = Instant::now();
+        let mut ffmpeg_args = vec![
+            "-y".to_string(),
+            "-f".to_string(),
+            "rawvideo".to_string(),
+            "-pix_fmt".to_string(),
+            "rgba".to_string(),
+            "-s".to_string(),
+            format!("{}x{}", spec.width, spec.height),
+            "-r".to_string(),
+            fps.to_string(),
+            "-i".to_string(),
+            "-".to_string(),
+        ];
+
+        if let Some(ref audio_path) = spec.audio {
+            ffmpeg_args.push("-i".to_string());
+            ffmpeg_args.push(audio_path.clone());
+        }
+
+        ffmpeg_args.push("-c:v".to_string());
+        ffmpeg_args.push("libx264".to_string());
+        ffmpeg_args.push("-pix_fmt".to_string());
+        ffmpeg_args.push("yuv420p".to_string());
+
+        if spec.audio.is_some() {
+            ffmpeg_args.push("-c:a".to_string());
+            ffmpeg_args.push("aac".to_string());
+            ffmpeg_args.push("-shortest".to_string());
+        }
+
+        ffmpeg_args.push(spec.output.clone());
+
         let mut ffmpeg_cmd = Command::new("ffmpeg")
-            .args(&[
-                "-y",
-                "-f", "rawvideo",
-                "-pix_fmt", "rgba",
-                "-s", &format!("{}x{}", spec.width, spec.height),
-                "-r", &fps.to_string(),
-                "-i", "-",
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                &spec.output,
-            ])
+            .args(&ffmpeg_args)
             .stdin(Stdio::piped())
             .spawn()
             .expect("Failed to spawn ffmpeg process");

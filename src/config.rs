@@ -10,6 +10,7 @@ pub struct RenderSpec {
     pub effects: Vec<Effect>,
     pub fps: Option<u32>,
     pub duration: Option<f32>,
+    pub audio: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
