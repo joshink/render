@@ -1,0 +1,17 @@
+{
+  "width": 800,
+  "height": 800,
+  "input": "input.jpg",
+  "output": "output.png",
+  "effects": [
+    {
+      "effect_type": "grayscale"
+    },
+    {
+      "effect_type": "brightness",
+      "params": {
+        "factor": 1.3
+      }
+    }
+  ]
+}
