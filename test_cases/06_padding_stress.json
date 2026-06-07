@@ -1,0 +1,11 @@
+{
+  "width": 373,
+  "height": 517,
+  "input": "input.jpg",
+  "output": "test_cases/outputs/06_padding_stress.png",
+  "effects": [
+    {
+      "effect_type": "grayscale"
+    }
+  ]
+}

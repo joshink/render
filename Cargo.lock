@@ -1493,6 +1493,7 @@ dependencies = [
  "bytemuck",
  "env_logger",
  "image",
+ "libc",
  "log",
  "pollster",
  "serde",

@@ -8,6 +8,8 @@ pub struct RenderSpec {
     pub input: String,
     pub output: String,
     pub effects: Vec<Effect>,
+    pub fps: Option<u32>,
+    pub duration: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -26,7 +28,7 @@ pub struct ShaderParams {
 }
 
 impl RenderSpec {
-    pub fn to_shader_params(&self) -> ShaderParams {
+    pub fn to_shader_params(&self, time: f32) -> ShaderParams {
         let mut grayscale = 0u32;
         let mut brightness = 1.0f32;
 
@@ -34,6 +36,10 @@ impl RenderSpec {
             match effect.effect_type.as_str() {
                 "grayscale" => {
                     grayscale = 1;
+                    if self.duration.is_some() {
+                        // Toggle grayscale back and forth every second
+                        grayscale = if (time * std::f32::consts::PI).sin() > 0.0 { 1 } else { 0 };
+                    }
                 }
                 "brightness" => {
                     if let Some(ref params) = effect.params {
@@ -42,6 +48,10 @@ impl RenderSpec {
                                 brightness = factor as f32;
                             }
                         }
+                    }
+                    if self.duration.is_some() {
+                        // Oscillate brightness over time (between factor * 0.2 and factor * 1.8)
+                        brightness = brightness * (1.0 + 0.8 * (time * 2.0 * std::f32::consts::PI).sin());
                     }
                 }
                 _ => {}

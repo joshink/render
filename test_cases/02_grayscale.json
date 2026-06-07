@@ -1,0 +1,11 @@
+{
+  "width": 800,
+  "height": 800,
+  "input": "input.jpg",
+  "output": "test_cases/outputs/02_grayscale.png",
+  "effects": [
+    {
+      "effect_type": "grayscale"
+    }
+  ]
+}

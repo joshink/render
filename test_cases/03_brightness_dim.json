@@ -1,0 +1,14 @@
+{
+  "width": 800,
+  "height": 800,
+  "input": "input.jpg",
+  "output": "test_cases/outputs/03_brightness_dim.png",
+  "effects": [
+    {
+      "effect_type": "brightness",
+      "params": {
+        "factor": 0.5
+      }
+    }
+  ]
+}
