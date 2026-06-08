@@ -1,3 +1,15 @@
+/* TRANSITION_METADATA:
+{
+  "type": "slide_switch",
+  "params": [
+    { "name": "direction", "type": "float", "default": 0.0 },
+    { "name": "flicker_intensity", "type": "float", "default": 0.15 },
+    { "name": "gap_size", "type": "float", "default": 0.1 },
+    { "name": "z_padding", "type": "float", "default": 0.0 }
+  ]
+}
+*/
+
 @group(0) @binding(0) var tex_from: texture_2d<f32>;
 @group(0) @binding(1) var tex_to: texture_2d<f32>;
 @group(0) @binding(2) var output_tex: texture_storage_2d<rgba8unorm, write>;
@@ -14,7 +26,7 @@ struct CustomParams {
     direction: f32,          // 0.0 for horizontal, 1.0 for vertical
     flicker_intensity: f32,  // Default 0.15
     gap_size: f32,           // Default 0.1
-    _padding: f32,
+    z_padding: f32,
 }
 @group(0) @binding(4) var<uniform> params: CustomParams;
 

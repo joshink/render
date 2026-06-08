@@ -86,7 +86,7 @@ The render specification is a declarative JSON structure representing a single t
     },
     "wave_shader": {
       "type": "shader",
-      "path": "shaders/wave.wgsl"
+      "path": "library/effects/wave.wgsl"
     }
   },
   "presets": [
@@ -364,7 +364,7 @@ Transitions cross-fade or wipe adjacent clips in a track over a specified overla
 
 ### 3.8.1. Built-in Transition Shaders Library
 
-The engine provides a collection of built-in transitions in the `shaders/` directory. These can be referenced in the transition spec using `type: "custom_shader"` and their corresponding shader asset ID pointing to the built-in WGSL file:
+The engine provides a collection of built-in transitions in the `library/transitions/` directory. These can be referenced in the transition spec using `type: "custom_shader"` and their corresponding shader asset ID pointing to the built-in WGSL file:
 
 #### A. Flash / Burn In (`"shader": "flash_burn_shader"`)
 Simulates a bright camera exposure flash peaking at the midpoint of the transition, combined with an organic film burn-in hot-spot that expands from the center to reveal the incoming clip.

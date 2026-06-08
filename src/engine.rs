@@ -4,7 +4,7 @@
 //! compute shaders (compositor, built-in effects, and custom user shaders),
 //! and reads the final pixel buffer back to the CPU for encoding.
 
-use crate::config::{RenderSpec, ClipType, CompositorParams, Clip, Effect};
+use crate::config::{RenderSpec, ClipType, CompositorParams, Clip, Effect, Transition};
 use log::{error};
 
 /// GPU-side uniform block for custom effect shaders.
@@ -204,6 +204,66 @@ pub fn pack_effect_params(
     } else {
         if let Some(ref p) = effect.params {
             pack_custom_params(p, clip_time, duration, width, height)
+        } else {
+            vec![0u8; 16]
+        }
+    }
+}
+
+pub fn pack_transition_params(
+    tr: &Transition,
+    progress: f32,
+    duration: f32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let shader_id = tr.shader.as_deref().unwrap_or(&tr.transition_type);
+    let registry = crate::config::get_transitions_registry();
+    if let Some(meta) = registry.iter().find(|m| &m.transition_type == shader_id) {
+        let mut sorted_params = meta.params.clone();
+        sorted_params.sort_by(|a, b| a.target_name().cmp(b.target_name()));
+
+        let mut buffer = Vec::new();
+        for param in sorted_params {
+            if param.param_type == "bool" {
+                let default_val = param.default;
+                let val_f32 = if let Some(ref map) = tr.params {
+                    if let Some(val) = map.get(&param.name) {
+                        crate::config::evaluate_float(val, progress * duration, duration, width, height, default_val)
+                    } else {
+                        default_val
+                    }
+                } else {
+                    default_val
+                };
+                let val_i32 = if val_f32 > 0.5 { 1i32 } else { 0i32 };
+                buffer.extend_from_slice(bytemuck::bytes_of(&val_i32));
+            } else {
+                let default_val = param.default;
+                let val_f32 = if let Some(ref map) = tr.params {
+                    if let Some(val) = map.get(&param.name) {
+                        crate::config::evaluate_float(val, progress * duration, duration, width, height, default_val)
+                    } else {
+                        default_val
+                    }
+                } else {
+                    default_val
+                };
+                buffer.extend_from_slice(bytemuck::bytes_of(&val_f32));
+            }
+        }
+
+        let aligned_len = (buffer.len() + 15) & !15;
+        while buffer.len() < aligned_len {
+            buffer.push(0);
+        }
+        if buffer.is_empty() {
+            buffer.resize(16, 0);
+        }
+        buffer
+    } else {
+        if let Some(ref p) = tr.params {
+            pack_custom_params(p, progress * duration, duration, width, height)
         } else {
             vec![0u8; 16]
         }
@@ -891,7 +951,7 @@ impl RenderContext {
         output_tex: &wgpu::Texture,
         spec: &RenderSpec,
     ) {
-        let shader_id = &tr.shader;
+        let shader_id = tr.shader.as_deref().unwrap_or(&tr.transition_type);
         if let Some(pipeline) = self.custom_shader_pipelines.get(shader_id) {
             let transition_params = TransitionEngineParams {
                 progress,
@@ -901,11 +961,7 @@ impl RenderContext {
             };
             self.queue.write_buffer(&self.transition_engine_params_buffer, 0, bytemuck::bytes_of(&transition_params));
 
-            let custom_params_data = if let Some(ref p) = tr.params {
-                pack_custom_params(p, progress * tr.duration, tr.duration, spec.composition.width, spec.composition.height)
-            } else {
-                vec![0u8; 16]
-            };
+            let custom_params_data = pack_transition_params(tr, progress, tr.duration, spec.composition.width, spec.composition.height);
             self.queue.write_buffer(&self.transition_custom_params_buffer, 0, &custom_params_data);
 
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {

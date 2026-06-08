@@ -10,11 +10,11 @@
   "assets": {
     "fade_shader": {
       "type": "shader",
-      "path": "shaders/fade.wgsl"
+      "path": "library/transitions/fade.wgsl"
     },
     "wipe_shader": {
       "type": "shader",
-      "path": "shaders/wipe.wgsl"
+      "path": "library/transitions/wipe.wgsl"
     }
   },
   "tracks": [

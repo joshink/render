@@ -197,6 +197,21 @@ fn run_test_case(spec_name: &str) {
                 let pixel = out_img.get_pixel(400, 400).to_rgba();
                 assert!(pixel[0] > 100 && (pixel[0] as i32 - pixel[1] as i32).abs() < 20, "Slide switch not settled on white/grey: {:?}", pixel);
             }
+        } else if spec_name == "10_dynamic_transitions.json" {
+            let t = review.timestamp;
+            if (t - 2.0).abs() < 0.1 {
+                // Fade midpoint (red to green)
+                let pixel = out_img.get_pixel(400, 400).to_rgba();
+                assert!(pixel[0] > 50 && pixel[1] > 50, "Fade midpoint not mixed red/green: {:?}", pixel);
+            } else if (t - 4.0).abs() < 0.1 {
+                // Focus blur midpoint (green to blue)
+                let pixel = out_img.get_pixel(400, 400).to_rgba();
+                assert!(pixel[1] > 30 && pixel[2] > 30, "Focus midpoint not mixed green/blue: {:?}", pixel);
+            } else if (t - 6.0).abs() < 0.1 {
+                // Slide switch settled on white/grey
+                let pixel = out_img.get_pixel(400, 400).to_rgba();
+                assert!(pixel[0] > 100 && (pixel[0] as i32 - pixel[1] as i32).abs() < 20, "Slide switch not settled on white/grey: {:?}", pixel);
+            }
         }
 
         // Perform pixel checks
@@ -467,5 +482,10 @@ fn test_08_text_layout() {
 #[test]
 fn test_09_tactile_transitions() {
     run_test_case("09_tactile_transitions.json");
+}
+
+#[test]
+fn test_10_dynamic_transitions() {
+    run_test_case("10_dynamic_transitions.json");
 }
 

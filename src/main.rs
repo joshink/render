@@ -670,39 +670,6 @@ fn main() {
     });
 
 
-
-    // Scan default directory "shaders/" and --include paths
-    let mut wgsl_files = Vec::new();
-    
-    // Scan default directory "shaders/"
-    let default_dir = std::path::Path::new("shaders");
-    if default_dir.exists() && default_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(default_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().map_or(false, |ext| ext == "wgsl") {
-                    wgsl_files.push(path);
-                }
-            }
-        }
-    }
-    
-    // Scan custom include paths from command line
-    for path in &args.include_paths {
-        if path.is_file() {
-            wgsl_files.push(path.clone());
-        } else if path.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_file() && p.extension().map_or(false, |ext| ext == "wgsl") {
-                        wgsl_files.push(p);
-                    }
-                }
-            }
-        }
-    }
-
     let effect_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Effect Bind Group Layout"),
         entries: &[
@@ -847,13 +814,26 @@ fn main() {
         push_constant_ranges: &[],
     });
 
-    // Scan default directory "shaders/" and --include paths
+    // Scan default directories "library/effects/" and "library/transitions/" and --include paths
     let mut wgsl_files = Vec::new();
     
-    // Scan default directory "shaders/"
-    let default_dir = std::path::Path::new("shaders");
-    if default_dir.exists() && default_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(default_dir) {
+    // Scan default directory "library/effects/"
+    let effects_dir = std::path::Path::new("library/effects");
+    if effects_dir.exists() && effects_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(effects_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "wgsl") {
+                    wgsl_files.push(path);
+                }
+            }
+        }
+    }
+
+    // Scan default directory "library/transitions/"
+    let transitions_dir = std::path::Path::new("library/transitions");
+    if transitions_dir.exists() && transitions_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(transitions_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() && path.extension().map_or(false, |ext| ext == "wgsl") {
@@ -882,7 +862,11 @@ fn main() {
     let mut transition_shaders = std::collections::HashSet::new();
     for track in &spec.tracks {
         for tr in &track.transitions {
-            transition_shaders.insert(tr.shader.clone());
+            if let Some(ref sh) = tr.shader {
+                transition_shaders.insert(sh.clone());
+            } else {
+                transition_shaders.insert(tr.transition_type.clone());
+            }
         }
     }
 
@@ -906,7 +890,32 @@ fn main() {
             || shader_str.contains("TransitionEngineParams")
             || shader_str.contains("tex_to");
         
-        if let Some(metadata_str) = extract_metadata(&shader_str) {
+        if let Some(metadata_str) = extract_transition_metadata(&shader_str) {
+            match serde_json::from_str::<TransitionMetadata>(&metadata_str) {
+                Ok(meta) => {
+                    info!("Loaded transition metadata: {} from {:?}", meta.transition_type, file_path);
+                    let transition_type = meta.transition_type.clone();
+                    register_transition_metadata(meta);
+                    
+                    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(&transition_type),
+                        source: wgpu::ShaderSource::Wgsl(shader_str.into()),
+                    });
+                    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some(&transition_type),
+                        layout: Some(&transition_pipeline_layout),
+                        module: &shader_module,
+                        entry_point: "main",
+                        cache: None,
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    });
+                    custom_shader_pipelines.insert(transition_type.clone(), pipeline);
+                }
+                Err(e) => {
+                    log::error!("Failed to parse transition metadata in {:?}: {}", file_path, e);
+                }
+            }
+        } else if let Some(metadata_str) = extract_metadata(&shader_str) {
             match serde_json::from_str::<EffectMetadata>(&metadata_str) {
                 Ok(meta) => {
                     info!("Loaded effect metadata: {} from {:?}", meta.effect_type, file_path);
@@ -957,6 +966,17 @@ fn main() {
         if let Asset::Shader { path } = asset {
             if !custom_shader_pipelines.contains_key(asset_id) {
                 let shader_str = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Failed to read shader {}", path));
+                
+                if let Some(metadata_str) = extract_transition_metadata(&shader_str) {
+                    if let Ok(meta) = serde_json::from_str::<TransitionMetadata>(&metadata_str) {
+                        register_transition_metadata(meta);
+                    }
+                } else if let Some(metadata_str) = extract_metadata(&shader_str) {
+                    if let Ok(meta) = serde_json::from_str::<EffectMetadata>(&metadata_str) {
+                        register_effect_metadata(meta);
+                    }
+                }
+                
                 let is_tr = transition_shaders.contains(asset_id)
                     || shader_str.contains("TransitionEngineParams")
                     || shader_str.contains("tex_to");

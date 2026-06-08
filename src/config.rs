@@ -63,6 +63,43 @@ pub fn get_effects_registry() -> Vec<EffectMetadata> {
     EFFECTS_REGISTRY.read().map(|r| r.clone()).unwrap_or_default()
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct TransitionMetadata {
+    #[serde(rename = "type")]
+    pub transition_type: String,
+    pub params: Vec<EffectParamMetadata>,
+    #[serde(default)]
+    pub spot_checks: Vec<SpotCheckMetadata>,
+}
+
+static TRANSITIONS_REGISTRY: RwLock<Vec<TransitionMetadata>> = RwLock::new(Vec::new());
+
+pub fn register_transition_metadata(meta: TransitionMetadata) {
+    if let Ok(mut registry) = TRANSITIONS_REGISTRY.write() {
+        if let Some(existing) = registry.iter_mut().find(|m| m.transition_type == meta.transition_type) {
+            *existing = meta;
+        } else {
+            registry.push(meta);
+        }
+    }
+}
+
+pub fn get_transitions_registry() -> Vec<TransitionMetadata> {
+    TRANSITIONS_REGISTRY.read().map(|r| r.clone()).unwrap_or_default()
+}
+
+pub fn extract_transition_metadata(wgsl: &str) -> Option<String> {
+    let start_tag = "/* TRANSITION_METADATA:";
+    let end_tag = "*/";
+    if let Some(start_idx) = wgsl.find(start_tag) {
+        let content_start = start_idx + start_tag.len();
+        if let Some(end_idx) = wgsl[content_start..].find(end_tag) {
+            return Some(wgsl[content_start..content_start + end_idx].trim().to_string());
+        }
+    }
+    None
+}
+
 pub fn extract_metadata(wgsl: &str) -> Option<String> {
     let start_tag = "/* EFFECTS_METADATA:";
     let end_tag = "*/";
@@ -287,7 +324,7 @@ pub struct Transition {
     pub id: String,
     #[serde(rename = "type")]
     pub transition_type: String,
-    pub shader: String,
+    pub shader: Option<String>,
     #[serde(default)]
     pub start: Option<f32>,
     pub duration: f32,
@@ -657,6 +694,7 @@ impl RenderSpec {
         events.push((self.composition.duration, "Composition end".to_string()));
 
         let registry = get_effects_registry();
+        let trans_registry = get_transitions_registry();
 
         for track in &self.tracks {
             let start_times = track.get_clip_start_times();
@@ -690,6 +728,43 @@ impl RenderSpec {
                                     ));
                                     t += check.time_step;
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (tr, start_time) in track.resolve_transitions() {
+                if is_movie {
+                    let tr_shader = tr.shader.as_deref().unwrap_or(&tr.transition_type);
+                    if let Some(meta) = trans_registry.iter().find(|m| &m.transition_type == tr_shader) {
+                        for check in &meta.spot_checks {
+                            let mut t = check.time_start;
+                            while t < tr.duration {
+                                let abs_time = start_time + t;
+                                let mut expl = check.format.clone();
+                                if let Some(ref param_name) = check.param_name {
+                                    let default_val = meta.params.iter()
+                                        .find(|p| &p.name == param_name)
+                                        .map(|p| p.default)
+                                        .unwrap_or(1.0);
+                                    let val = if let Some(ref map) = tr.params {
+                                        if let Some(val) = map.get(param_name) {
+                                            evaluate_float(val, t, tr.duration, self.composition.width, self.composition.height, default_val)
+                                        } else {
+                                            default_val
+                                        }
+                                    } else {
+                                        default_val
+                                    };
+                                    let replacement = if val > 0.5 { "ON" } else { "OFF" };
+                                    expl = expl.replace("{}", replacement);
+                                }
+                                events.push((
+                                    abs_time,
+                                    format!("Track '{}' - Transition '{}' - {}", track.id, tr.id, expl),
+                                ));
+                                t += check.time_step;
                             }
                         }
                     }

@@ -1,3 +1,10 @@
+/* TRANSITION_METADATA:
+{
+  "type": "fade",
+  "params": []
+}
+*/
+
 @group(0) @binding(0) var tex_from: texture_2d<f32>;
 @group(0) @binding(1) var tex_to: texture_2d<f32>;
 @group(0) @binding(2) var output_tex: texture_storage_2d<rgba8unorm, write>;
