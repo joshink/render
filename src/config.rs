@@ -1,7 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
+use evalexpr::{eval_with_context, ContextWithMutableVariables, HashMapContext};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// Root specification for a render job.
+#[derive(Deserialize, Debug, Clone)]
 pub struct RenderSpec {
     pub version: String,
     pub output: String,
@@ -11,7 +13,7 @@ pub struct RenderSpec {
     pub audio_tracks: Option<Vec<AudioTrack>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Composition {
     pub width: u32,
     pub height: u32,
@@ -19,7 +21,7 @@ pub struct Composition {
     pub duration: f32,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum Asset {
     #[serde(rename = "video")]
@@ -31,13 +33,10 @@ pub enum Asset {
     #[serde(rename = "shader")]
     Shader { path: String },
     #[serde(rename = "font")]
-    Font {
-        provider: String,
-        path: String,
-    },
+    Font { provider: String, path: String },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Track {
     pub id: String,
     #[serde(default)]
@@ -47,20 +46,7 @@ pub struct Track {
     pub transitions: Vec<Transition>,
 }
 
-impl Track {
-    pub fn get_clip_start_times(&self) -> Vec<f32> {
-        let mut start_times = Vec::with_capacity(self.clips.len());
-        let mut current_time = self.start;
-        for clip in &self.clips {
-            current_time += clip.offset.max(0.0);
-            start_times.push(current_time);
-            current_time += clip.duration;
-        }
-        start_times
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct AudioTrack {
     pub id: String,
     #[serde(default)]
@@ -68,20 +54,7 @@ pub struct AudioTrack {
     pub clips: Vec<AudioClip>,
 }
 
-impl AudioTrack {
-    pub fn get_clip_start_times(&self) -> Vec<f32> {
-        let mut start_times = Vec::with_capacity(self.clips.len());
-        let mut current_time = self.start;
-        for clip in &self.clips {
-            current_time += clip.offset.max(0.0);
-            start_times.push(current_time);
-            current_time += clip.duration;
-        }
-        start_times
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct AudioClip {
     pub id: String,
     pub asset: String,
@@ -90,11 +63,33 @@ pub struct AudioClip {
     pub offset: f32,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipType {
+    Media,
+    Solid,
+    Text,
+    Effect,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendMode {
+    #[default] Normal,
+    Multiply, Screen, Overlay, Darken, Lighten,
+    ColorDodge, ColorBurn, HardLight, SoftLight,
+    Difference, Exclusion,
+}
+
+impl BlendMode {
+    pub fn as_u32(self) -> u32 { self as u32 }
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct Clip {
     pub id: String,
     #[serde(rename = "type")]
-    pub clip_type: String,
+    pub clip_type: ClipType,
     pub asset: Option<String>,
     pub duration: f32,
     #[serde(default)]
@@ -112,17 +107,17 @@ pub struct Clip {
     #[serde(default)]
     pub shader: Option<String>,
     #[serde(default)]
-    pub blend_mode: Option<String>,
+    pub blend_mode: Option<BlendMode>,
     #[serde(default)]
-    pub params: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub params: Option<HashMap<String, serde_json::Value>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct SolidParams {
     pub color: [f32; 4],
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct TextParams {
     pub text: String,
     pub font: String,
@@ -132,7 +127,7 @@ pub struct TextParams {
     pub axes: Option<HashMap<String, serde_json::Value>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Transform {
     pub position: Option<serde_json::Value>,
     pub scale: Option<serde_json::Value>,
@@ -140,7 +135,7 @@ pub struct Transform {
     pub opacity: Option<serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Effect {
     #[serde(rename = "type")]
     pub effect_type: String,
@@ -149,7 +144,7 @@ pub struct Effect {
     pub params: Option<HashMap<String, serde_json::Value>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Transition {
     pub id: String,
     #[serde(rename = "type")]
@@ -161,21 +156,62 @@ pub struct Transition {
     pub to: String,
 }
 
-// Memory layout aligned to 16-byte boundaries for the WGSL uniform block
+/// GPU layout for custom built-in effect shader uniforms.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShaderParams {
     pub grayscale: u32,
     pub brightness: f32,
-    pub _padding: [u32; 2], // Pad to 16 bytes (128-bit alignment)
+    pub _padding: [u32; 2],
+}
+
+/// GPU layout for compositor shader uniforms.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CompositorParams {
+    pub position: [f32; 2],
+    pub scale: [f32; 2],
+    pub rotation: f32,
+    pub opacity: f32,
+    pub clip_type: u32,
+    pub blend_mode: u32,
+    pub grayscale: u32,
+    pub brightness: f32,
+    pub _padding: [u32; 2],
+    pub solid_color: [f32; 4],
+}
+
+impl Track {
+    pub fn get_clip_start_times(&self) -> Vec<f32> {
+        let mut start_times = Vec::with_capacity(self.clips.len());
+        let mut current_time = self.start;
+        for clip in &self.clips {
+            current_time += clip.offset.max(0.0);
+            start_times.push(current_time);
+            current_time += clip.duration;
+        }
+        start_times
+    }
+}
+
+impl AudioTrack {
+    pub fn get_clip_start_times(&self) -> Vec<f32> {
+        let mut start_times = Vec::with_capacity(self.clips.len());
+        let mut current_time = self.start;
+        for clip in &self.clips {
+            current_time += clip.offset.max(0.0);
+            start_times.push(current_time);
+            current_time += clip.duration;
+        }
+        start_times
+    }
 }
 
 impl RenderSpec {
     pub fn get_input_path(&self) -> Option<String> {
-        // Look for the first media clip that has an associated asset
         for track in &self.tracks {
             for clip in &track.clips {
-                if clip.clip_type == "media" {
+                if clip.clip_type == ClipType::Media {
                     if let Some(ref asset_id) = clip.asset {
                         if let Some(asset) = self.assets.get(asset_id) {
                             match asset {
@@ -219,7 +255,6 @@ impl RenderSpec {
         let mut events = Vec::new();
         let is_movie = self.output.ends_with(".mp4");
 
-        // Always check composition start and end
         events.push((0.0, "Composition start".to_string()));
         events.push((self.composition.duration, "Composition end".to_string()));
 
@@ -253,25 +288,17 @@ impl RenderSpec {
                             "brightness" => {
                                 let mut t = 0.25;
                                 while t < clip.duration {
-                                    let abs_time = clip_start + t;
                                     events.push((
-                                        abs_time,
-                                        format!(
-                                            "Track '{}' - Clip '{}' - Brightness at peak (factor oscillation)",
-                                            track.id, clip.id
-                                        ),
+                                        clip_start + t,
+                                        format!("Track '{}' - Clip '{}' - Brightness at peak (factor oscillation)", track.id, clip.id),
                                     ));
                                     t += 1.0;
                                 }
                                 let mut t = 0.75;
                                 while t < clip.duration {
-                                    let abs_time = clip_start + t;
                                     events.push((
-                                        abs_time,
-                                        format!(
-                                            "Track '{}' - Clip '{}' - Brightness at trough (factor oscillation)",
-                                            track.id, clip.id
-                                        ),
+                                        clip_start + t,
+                                        format!("Track '{}' - Clip '{}' - Brightness at trough (factor oscillation)", track.id, clip.id),
                                     ));
                                     t += 1.0;
                                 }
@@ -281,99 +308,69 @@ impl RenderSpec {
                     }
                 }
             }
-
-            for transition in &track.transitions {
-                let trans_start = transition.start;
-                let trans_mid = transition.start + transition.duration / 2.0;
-                let trans_end = transition.start + transition.duration;
-
-                events.push((
-                    trans_start,
-                    format!(
-                        "Track '{}' - Transition '{}' starts (from '{}' to '{}')",
-                        track.id, transition.id, transition.from, transition.to
-                    ),
-                ));
-                events.push((
-                    trans_mid,
-                    format!("Track '{}' - Transition '{}' midpoint", track.id, transition.id),
-                ));
-                events.push((
-                    trans_end,
-                    format!("Track '{}' - Transition '{}' ends", track.id, transition.id),
-                ));
-            }
         }
-
-        // Keep events within [0, duration]
         events.retain(|(t, _)| *t >= 0.0 && *t <= self.composition.duration);
         events
     }
-
-    pub fn to_shader_params(&self, time: f32) -> ShaderParams {
-        let mut grayscale = 0u32;
-        let mut brightness = 1.0f32;
-
-        let is_movie = self.output.ends_with(".mp4");
-
-        // Find the active clip and evaluate its effects
-        for track in &self.tracks {
-            let start_times = track.get_clip_start_times();
-            for (idx, clip) in track.clips.iter().enumerate() {
-                let absolute_start = start_times[idx];
-                if time >= absolute_start && time <= absolute_start + clip.duration {
-                    let clip_time = time - absolute_start;
-                    for effect in &clip.effects {
-                        match effect.effect_type.as_str() {
-                            "grayscale" => {
-                                grayscale = 1;
-                                if is_movie {
-                                    // Toggle grayscale back and forth every second (relative to clip start)
-                                    grayscale = if (clip_time * std::f32::consts::PI).sin() > 0.0 { 1 } else { 0 };
-                                }
-                            }
-                            "brightness" => {
-                                if let Some(ref params) = effect.params {
-                                    if let Some(factor_val) = params.get("factor") {
-                                        if let Some(factor) = factor_val.as_f64() {
-                                            brightness = factor as f32;
-                                        }
-                                    }
-                                }
-                                if is_movie {
-                                    // Oscillate brightness over time (between factor * 0.2 and factor * 1.8, relative to clip start)
-                                    brightness = brightness * (1.0 + 0.8 * (clip_time * 2.0 * std::f32::consts::PI).sin());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        ShaderParams {
-            grayscale,
-            brightness,
-            _padding: [0, 0],
-        }
-    }
 }
 
-// Memory layout aligned to 16-byte boundaries for the WebGPU uniform block in compositor.wgsl
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CompositorParams {
-    pub position: [f32; 2],
-    pub scale: [f32; 2],
-    pub rotation: f32,
-    pub opacity: f32,
-    pub clip_type: u32,
-    pub blend_mode: u32,
-    pub grayscale: u32,
-    pub brightness: f32,
-    pub _padding: [u32; 2],
-    pub solid_color: [f32; 4],
+impl Clip {
+    pub fn eval_position(&self, t: f32, w: u32, h: u32) -> [f32; 2] {
+        self.transform.as_ref()
+            .and_then(|tr| tr.position.as_ref())
+            .map(|v| evaluate_vec2(v, t, w, h, [w as f32 * 0.5, h as f32 * 0.5]))
+            .unwrap_or([w as f32 * 0.5, h as f32 * 0.5])
+    }
+    
+    pub fn eval_scale(&self, t: f32, w: u32, h: u32) -> [f32; 2] {
+        self.transform.as_ref()
+            .and_then(|tr| tr.scale.as_ref())
+            .map(|v| evaluate_vec2(v, t, w, h, [1.0, 1.0]))
+            .unwrap_or([1.0, 1.0])
+    }
+
+    pub fn eval_rotation(&self, t: f32, w: u32, h: u32) -> f32 {
+        self.transform.as_ref()
+            .and_then(|tr| tr.rotation.as_ref())
+            .map(|v| evaluate_float(v, t, w, h, 0.0))
+            .unwrap_or(0.0)
+    }
+
+    pub fn eval_opacity(&self, t: f32, w: u32, h: u32) -> f32 {
+        self.transform.as_ref()
+            .and_then(|tr| tr.opacity.as_ref())
+            .map(|v| evaluate_float(v, t, w, h, 1.0))
+            .unwrap_or(1.0)
+    }
+    
+    pub fn eval_built_in_effects(&self, clip_time: f32, is_movie: bool) -> (u32, f32) {
+        let mut grayscale = 0u32;
+        let mut brightness = 1.0f32;
+        for effect in &self.effects {
+            match effect.effect_type.as_str() {
+                "grayscale" => {
+                    grayscale = 1;
+                    if is_movie {
+                        grayscale = if (clip_time * std::f32::consts::PI).sin() > 0.0 { 1 } else { 0 };
+                    }
+                }
+                "brightness" => {
+                    if let Some(ref params) = effect.params {
+                        if let Some(factor_val) = params.get("factor") {
+                            if let Some(factor) = factor_val.as_f64() {
+                                brightness = factor as f32;
+                            }
+                        }
+                    }
+                    if is_movie {
+                        brightness = brightness * (1.0 + 0.8 * (clip_time * 2.0 * std::f32::consts::PI).sin());
+                    }
+                }
+                _ => {}
+            }
+        }
+        (grayscale, brightness)
+    }
 }
 
 pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, width: u32, height: u32, default: f32) -> f32 {
@@ -496,32 +493,21 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, heig
 }
 
 pub fn evaluate_simple_expression(expr: &str, clip_time: f32, width: u32, height: u32, default: f32) -> f32 {
-    let cleaned = expr
-        .replace("clip.time", &clip_time.to_string())
-        .replace("time", &clip_time.to_string())
-        .replace("comp.width", &width.to_string())
-        .replace("comp.height", &height.to_string());
-    
-    if let Some(pos) = cleaned.find('*') {
-        let left = cleaned[..pos].trim().parse::<f32>().unwrap_or(0.0);
-        let right = cleaned[pos+1..].trim().parse::<f32>().unwrap_or(0.0);
-        return left * right;
+    let cleaned_expr = expr.replace(".", "_");
+    let mut context = HashMapContext::new();
+    let _ = context.set_value("time".into(), (clip_time as f64).into());
+    let _ = context.set_value("clip_time".into(), (clip_time as f64).into());
+    let _ = context.set_value("comp_width".into(), (width as i64).into());
+    let _ = context.set_value("comp_height".into(), (height as i64).into());
+    let _ = context.set_value("pi".into(), (std::f64::consts::PI).into());
+
+    if let Ok(evalexpr::Value::Float(result)) = eval_with_context(&cleaned_expr, &context) {
+        return result as f32;
     }
-    if let Some(pos) = cleaned.find('/') {
-        let left = cleaned[..pos].trim().parse::<f32>().unwrap_or(0.0);
-        let right = cleaned[pos+1..].trim().parse::<f32>().unwrap_or(1.0);
-        return left / right;
-    }
-    if let Some(pos) = cleaned.find('+') {
-        let left = cleaned[..pos].trim().parse::<f32>().unwrap_or(0.0);
-        let right = cleaned[pos+1..].trim().parse::<f32>().unwrap_or(0.0);
-        return left + right;
-    }
-    if let Some(pos) = cleaned.find('-') {
-        let left = cleaned[..pos].trim().parse::<f32>().unwrap_or(0.0);
-        let right = cleaned[pos+1..].trim().parse::<f32>().unwrap_or(0.0);
-        return left - right;
+    if let Ok(evalexpr::Value::Int(result)) = eval_with_context(&cleaned_expr, &context) {
+        return result as f32;
     }
     
-    cleaned.parse::<f32>().unwrap_or(default)
+    // Fallback for simple parse
+    expr.parse::<f32>().unwrap_or(default)
 }

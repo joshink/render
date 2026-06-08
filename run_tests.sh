@@ -9,13 +9,13 @@ BOLD='\033[1m'
 echo -e "${BOLD}====================================================${NC}"
 echo -e "${BOLD} 1. Building Render PoC Engine...${NC}"
 echo -e "${BOLD}====================================================${NC}"
-cargo build
+cargo build --release
 
 echo ""
 echo -e "${BOLD}====================================================${NC}"
 echo -e "${BOLD} 2. Running Progressive Integration Tests...${NC}"
 echo -e "${BOLD}====================================================${NC}"
-cargo test --test integration
+cargo test --test integration --release
 
 echo ""
 echo -e "${BOLD}====================================================${NC}"

@@ -3,80 +3,7 @@ use std::process::Command;
 use image::{GenericImageView, Pixel};
 use serde::Deserialize;
 
-#[derive(Deserialize, Debug)]
-struct TestSpec {
-    output: String,
-    composition: TestComposition,
-    assets: std::collections::HashMap<String, TestAsset>,
-    tracks: Vec<TestTrack>,
-    audio_tracks: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize, Debug)]
-struct TestComposition {
-    width: u32,
-    height: u32,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(tag = "type")]
-enum TestAsset {
-    #[serde(rename = "video")]
-    Video { path: String },
-    #[serde(rename = "image")]
-    Image { path: String },
-    #[serde(rename = "audio")]
-    Audio { path: String },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Deserialize, Debug)]
-struct TestTrack {
-    clips: Vec<TestClip>,
-}
-
-#[derive(Deserialize, Debug)]
-struct TestClip {
-    #[serde(rename = "type")]
-    clip_type: String,
-    asset: Option<String>,
-    #[serde(default)]
-    effects: Vec<serde_json::Value>,
-}
-
-impl TestSpec {
-    fn get_input_path(&self) -> String {
-        for track in &self.tracks {
-            for clip in &track.clips {
-                if clip.clip_type == "media" {
-                    if let Some(ref asset_id) = clip.asset {
-                        if let Some(asset) = self.assets.get(asset_id) {
-                            match asset {
-                                TestAsset::Image { path } => return path.clone(),
-                                TestAsset::Video { path } => return path.clone(),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        panic!("No media clip with asset path found in the test spec");
-    }
-
-    fn get_effects(&self) -> Vec<serde_json::Value> {
-        let mut effects = Vec::new();
-        for track in &self.tracks {
-            for clip in &track.clips {
-                if clip.clip_type == "media" {
-                    effects.extend(clip.effects.clone());
-                }
-            }
-        }
-        effects
-    }
-}
+use render_poc::config::{RenderSpec, ClipType};
 
 fn run_test_case(spec_name: &str) {
     let spec_path = format!("test_cases/{}", spec_name);
@@ -90,7 +17,7 @@ fn run_test_case(spec_name: &str) {
 
     // Parse spec first to get output path and composition parameters
     let spec_file = std::fs::File::open(&spec_path).expect("Failed to open spec JSON file");
-    let spec: TestSpec = serde_json::from_reader(spec_file).expect("Failed to parse spec JSON file");
+    let spec: RenderSpec = serde_json::from_reader(spec_file).expect("Failed to parse spec JSON file");
     let output_path = Path::new(&spec.output);
     
     // Clean up old output if it exists
@@ -136,7 +63,7 @@ fn run_test_case(spec_name: &str) {
     assert!(!review_frames.is_empty(), "review.json is empty");
 
     // Load input image and resize to match spec composition
-    let input_path = spec.get_input_path();
+    let input_path = spec.get_input_path().expect("No media clip with asset path found in the test spec");
     let in_img = image::open(&input_path).expect("Failed to open input image");
     let in_resized = in_img.resize_exact(spec.composition.width, spec.composition.height, image::imageops::FilterType::Lanczos3);
 
@@ -145,21 +72,28 @@ fn run_test_case(spec_name: &str) {
     let mut static_dim = false;
     let mut static_bright = false;
 
-    let effects = spec.get_effects();
-    for effect in &effects {
-        if let Some(effect_type) = effect.get("type").and_then(|v| v.as_str()) {
-            match effect_type {
-                "grayscale" => static_grayscale = true,
-                "brightness" => {
-                    if let Some(factor) = effect.get("params").and_then(|p| p.get("factor")).and_then(|f| f.as_f64()) {
-                        if factor < 1.0 {
-                            static_dim = true;
-                        } else if factor > 1.0 {
-                            static_bright = true;
+    for track in &spec.tracks {
+        for clip in &track.clips {
+            if clip.clip_type == ClipType::Media {
+                for effect in &clip.effects {
+                    match effect.effect_type.as_str() {
+                        "grayscale" => static_grayscale = true,
+                        "brightness" => {
+                            if let Some(ref params) = effect.params {
+                                if let Some(factor_val) = params.get("factor") {
+                                    if let Some(factor) = factor_val.as_f64() {
+                                        if factor < 1.0 {
+                                            static_dim = true;
+                                        } else if factor > 1.0 {
+                                            static_bright = true;
+                                        }
+                                    }
+                                }
+                            }
                         }
+                        _ => {}
                     }
                 }
-                _ => {}
             }
         }
     }
