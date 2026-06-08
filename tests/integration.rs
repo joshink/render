@@ -1,65 +1,161 @@
 use std::path::Path;
 use std::process::Command;
 use image::{GenericImageView, Pixel};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
 struct TestSpec {
+    output: String,
+    composition: TestComposition,
+    assets: std::collections::HashMap<String, TestAsset>,
+    tracks: Vec<TestTrack>,
+    audio_tracks: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TestComposition {
     width: u32,
     height: u32,
-    input: String,
-    output: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type")]
+enum TestAsset {
+    #[serde(rename = "video")]
+    Video { path: String },
+    #[serde(rename = "image")]
+    Image { path: String },
+    #[serde(rename = "audio")]
+    Audio { path: String },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize, Debug)]
+struct TestTrack {
+    clips: Vec<TestClip>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TestClip {
+    #[serde(rename = "type")]
+    clip_type: String,
+    asset: Option<String>,
+    #[serde(default)]
     effects: Vec<serde_json::Value>,
+}
+
+impl TestSpec {
+    fn get_input_path(&self) -> String {
+        for track in &self.tracks {
+            for clip in &track.clips {
+                if clip.clip_type == "media" {
+                    if let Some(ref asset_id) = clip.asset {
+                        if let Some(asset) = self.assets.get(asset_id) {
+                            match asset {
+                                TestAsset::Image { path } => return path.clone(),
+                                TestAsset::Video { path } => return path.clone(),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        panic!("No media clip with asset path found in the test spec");
+    }
+
+    fn get_effects(&self) -> Vec<serde_json::Value> {
+        let mut effects = Vec::new();
+        for track in &self.tracks {
+            for clip in &track.clips {
+                if clip.clip_type == "media" {
+                    effects.extend(clip.effects.clone());
+                }
+            }
+        }
+        effects
+    }
 }
 
 fn run_test_case(spec_name: &str) {
     let spec_path = format!("test_cases/{}", spec_name);
     let binary_path = env!("CARGO_BIN_EXE_render-poc");
+    
+    // Determine the base folder name (e.g., "01_identity" from "01_identity.json")
+    let spec_base = spec_name.strip_suffix(".json").unwrap_or(spec_name);
+    let debug_base_dir = format!("test_cases/outputs/debug/{}", spec_base);
+    
+    println!("Running binary: {} with spec: {} and debug dir: {}", binary_path, spec_path, debug_base_dir);
 
-    println!("Running binary: {} with spec: {}", binary_path, spec_path);
-
-    // Ensure parent directory for output exists
+    // Parse spec first to get output path and composition parameters
     let spec_file = std::fs::File::open(&spec_path).expect("Failed to open spec JSON file");
     let spec: TestSpec = serde_json::from_reader(spec_file).expect("Failed to parse spec JSON file");
     let output_path = Path::new(&spec.output);
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).expect("Failed to create output directory");
-    }
-
+    
     // Clean up old output if it exists
     if output_path.exists() {
-        std::fs::remove_file(output_path).expect("Failed to clean up old output image");
+        std::fs::remove_file(output_path).expect("Failed to clean up old output image/movie");
+    }
+    
+    let debug_base_path = Path::new(&debug_base_dir);
+    if debug_base_path.exists() {
+        std::fs::remove_dir_all(debug_base_path).expect("Failed to clean up old debug base directory");
     }
 
     // Execute the rendering binary
     let status = Command::new(binary_path)
+        .arg("-i")
         .arg(&spec_path)
+        .arg("--debug")
+        .arg(&debug_base_dir)
         .status()
         .expect("Failed to run rendering binary");
 
     assert!(status.success(), "Binary execution failed for spec {}", spec_name);
-    assert!(output_path.exists(), "Output image was not created for spec {}", spec_name);
+    assert!(output_path.exists(), "Output file was not created for spec {}", spec_name);
 
-    // Load output image
-    let out_img = image::open(output_path).expect("Failed to open generated output image");
-    assert_eq!(out_img.width(), spec.width, "Output image width mismatch");
-    assert_eq!(out_img.height(), spec.height, "Output image height mismatch");
+    // Verify debug folder structure
+    let run_folder_name = format!("{}_json_render_0001", spec_base);
+    let run_folder_path = debug_base_path.join(run_folder_name);
+    
+    assert!(run_folder_path.exists(), "Debug run folder {:?} was not created", run_folder_path);
+    assert!(run_folder_path.join("logs.txt").exists(), "logs.txt was not created");
+    assert!(run_folder_path.join("review.json").exists(), "review.json was not created");
 
-    // Perform specific effect assertions
-    let mut has_grayscale = false;
-    let mut is_dim = false;
-    let mut is_bright = false;
+    // Load review.json
+    let review_file = std::fs::File::open(run_folder_path.join("review.json")).expect("Failed to open review.json");
+    #[derive(Deserialize, Debug)]
+    struct ReviewFrame {
+        frame: u32,
+        timestamp: f32,
+        file: String,
+        explanation: String,
+    }
+    let review_frames: Vec<ReviewFrame> = serde_json::from_reader(review_file).expect("Failed to parse review.json");
+    assert!(!review_frames.is_empty(), "review.json is empty");
 
-    for effect in &spec.effects {
-        if let Some(effect_type) = effect.get("effect_type").and_then(|v| v.as_str()) {
+    // Load input image and resize to match spec composition
+    let input_path = spec.get_input_path();
+    let in_img = image::open(&input_path).expect("Failed to open input image");
+    let in_resized = in_img.resize_exact(spec.composition.width, spec.composition.height, image::imageops::FilterType::Lanczos3);
+
+    // Static effects from spec (for single frame checks or static checks)
+    let mut static_grayscale = false;
+    let mut static_dim = false;
+    let mut static_bright = false;
+
+    let effects = spec.get_effects();
+    for effect in &effects {
+        if let Some(effect_type) = effect.get("type").and_then(|v| v.as_str()) {
             match effect_type {
-                "grayscale" => has_grayscale = true,
+                "grayscale" => static_grayscale = true,
                 "brightness" => {
                     if let Some(factor) = effect.get("params").and_then(|p| p.get("factor")).and_then(|f| f.as_f64()) {
                         if factor < 1.0 {
-                            is_dim = true;
+                            static_dim = true;
                         } else if factor > 1.0 {
-                            is_bright = true;
+                            static_bright = true;
                         }
                     }
                 }
@@ -68,73 +164,152 @@ fn run_test_case(spec_name: &str) {
         }
     }
 
-    // Load input image to compare brightness/pixels if needed
-    let in_img = image::open(&spec.input).expect("Failed to open input image");
-    // Resize input image matching spec to get a correct 1:1 comparison baseline
-    let in_resized = in_img.resize_exact(spec.width, spec.height, image::imageops::FilterType::Lanczos3);
+    let is_movie = spec.output.ends_with(".mp4");
+    let is_blend_modes = spec_name == "10_blend_modes.json";
+    let is_effect_layer = spec_name == "11_effect_layer.json";
+    let is_transform_keyframe = spec_name == "12_transform_keyframe.json";
+    let is_custom_shader_effect = spec_name == "13_custom_shader_effect.json";
 
-    // Verify pixels
-    let mut total_in_luma: u64 = 0;
-    let mut total_out_luma: u64 = 0;
-    let step_usize = 5usize;
-    let step_u32 = step_usize as u32;
+    let is_identity = !static_grayscale && !static_dim && !static_bright
+        && !is_blend_modes && !is_effect_layer && !is_transform_keyframe && !is_custom_shader_effect;
 
-    for y in (0..spec.height).step_by(step_usize) {
-        for x in (0..spec.width).step_by(step_usize) {
-            let out_pixel = out_img.get_pixel(x, y).to_rgba();
-            let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+    // Assertions for each frame in review.json
+    for review in &review_frames {
+        let frame_path = run_folder_path.join(&review.file);
+        assert!(frame_path.exists(), "Frame file {:?} does not exist", frame_path);
 
-            // 1. Grayscale verification: R, G, B should be equal (within threshold)
-            if has_grayscale {
+        let out_img = image::open(frame_path).expect("Failed to open debug frame image");
+        assert_eq!(out_img.width(), spec.composition.width, "Debug frame width mismatch");
+        assert_eq!(out_img.height(), spec.composition.height, "Debug frame height mismatch");
+
+        // Determine active properties for this frame
+        let mut check_grayscale = None;
+        let mut check_dim = None;
+        let mut check_bright = None;
+
+        if is_movie {
+            if review.explanation.contains("Grayscale is ON") {
+                check_grayscale = Some(true);
+            } else if review.explanation.contains("Grayscale is OFF") {
+                check_grayscale = Some(false);
+            }
+
+            if review.explanation.contains("Brightness at peak") {
+                if static_bright {
+                    check_bright = Some(true);
+                } else if static_dim {
+                    check_dim = Some(true);
+                }
+            } else if review.explanation.contains("Brightness at trough") {
+                check_dim = Some(true);
+            }
+        } else {
+            if static_grayscale {
+                check_grayscale = Some(true);
+            }
+            if static_dim {
+                check_dim = Some(true);
+            }
+            if static_bright {
+                check_bright = Some(true);
+            }
+            if is_blend_modes {
+                check_dim = Some(true);
+            }
+            if is_effect_layer {
+                check_grayscale = Some(true);
+            }
+            if is_transform_keyframe {
+                check_dim = Some(true);
+            }
+        }
+
+        // Perform pixel checks
+        let mut total_in_luma: u64 = 0;
+        let mut total_out_luma: u64 = 0;
+        let mut has_color = false;
+        let step_usize = 5usize;
+        let step_u32 = step_usize as u32;
+
+        for y in (0..spec.composition.height).step_by(step_usize) {
+            for x in (0..spec.composition.width).step_by(step_usize) {
+                let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+
                 let r = out_pixel[0];
                 let g = out_pixel[1];
                 let b = out_pixel[2];
-                // Allow a small delta of 2 due to rounding differences in YUV/grayscale luma formula
-                let delta_rg = (r as i32 - g as i32).abs();
-                let delta_gb = (g as i32 - b as i32).abs();
-                assert!(delta_rg <= 2, "Pixel at ({}, {}) is not grayscale: R={}, G={}", x, y, r, g);
-                assert!(delta_gb <= 2, "Pixel at ({}, {}) is not grayscale: G={}, B={}", x, y, g, b);
+
+                if let Some(true) = check_grayscale {
+                    let delta_rg = (r as i32 - g as i32).abs();
+                    let delta_gb = (g as i32 - b as i32).abs();
+                    assert!(delta_rg <= 2, "Pixel at ({}, {}) is not grayscale: R={}, G={}", x, y, r, g);
+                    assert!(delta_gb <= 2, "Pixel at ({}, {}) is not grayscale: G={}, B={}", x, y, g, b);
+                } else {
+                    let delta_rg = (r as i32 - g as i32).abs();
+                    let delta_gb = (g as i32 - b as i32).abs();
+                    if delta_rg > 5 || delta_gb > 5 {
+                        has_color = true;
+                    }
+                }
+
+                let in_luma = (in_pixel[0] as u32 + in_pixel[1] as u32 + in_pixel[2] as u32) / 3;
+                let out_luma = (out_pixel[0] as u32 + out_pixel[1] as u32 + out_pixel[2] as u32) / 3;
+                total_in_luma += in_luma as u64;
+                total_out_luma += out_luma as u64;
             }
-
-            // Accumulate luma (simple average of RGB) for brightness verification
-            let in_luma = (in_pixel[0] as u32 + in_pixel[1] as u32 + in_pixel[2] as u32) / 3;
-            let out_luma = (out_pixel[0] as u32 + out_pixel[1] as u32 + out_pixel[2] as u32) / 3;
-            total_in_luma += in_luma as u64;
-            total_out_luma += out_luma as u64;
         }
-    }
 
-    let num_samples = (((spec.height + step_u32 - 1) / step_u32) * ((spec.width + step_u32 - 1) / step_u32)) as f64;
-    let avg_in = total_in_luma as f64 / num_samples;
-    let avg_out = total_out_luma as f64 / num_samples;
-
-    println!("Spec {}: Avg input luma = {:.2}, Avg output luma = {:.2}", spec_name, avg_in, avg_out);
-
-    if is_dim {
-        assert!(avg_out < avg_in, "Output image is not dimmed! avg_in={:.2}, avg_out={:.2}", avg_in, avg_out);
-    } else if is_bright {
-        // Since we scale brightness, ensure average luma increased (unless already saturated at 255)
-        if avg_in < 250.0 {
-            assert!(avg_out > avg_in, "Output image is not brightened! avg_in={:.2}, avg_out={:.2}", avg_in, avg_out);
+        if let Some(false) = check_grayscale {
+            assert!(has_color, "Frame {} (t={:.2}) is grayscale but should have color!", review.frame, review.timestamp);
         }
-    } else if !has_grayscale {
-        // Identity check: pixel values should be exactly/very close to resized input values
-        // Allow tiny delta due to compression/GPU format precision
-        let mut diff_count = 0;
-        for y in (0..spec.height).step_by(step_usize) {
-            for x in (0..spec.width).step_by(step_usize) {
-                let out_pixel = out_img.get_pixel(x, y).to_rgba();
-                let in_pixel = in_resized.get_pixel(x, y).to_rgba();
-                for c in 0..3 {
-                    if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 3 {
-                        diff_count += 1;
+
+        let num_samples = (((spec.composition.height + step_u32 - 1) / step_u32) * ((spec.composition.width + step_u32 - 1) / step_u32)) as f64;
+        let avg_in = total_in_luma as f64 / num_samples;
+        let avg_out = total_out_luma as f64 / num_samples;
+
+        println!("Frame {} (t={:.2}): Avg input luma = {:.2}, Avg output luma = {:.2}", review.frame, review.timestamp, avg_in, avg_out);
+
+        if let Some(true) = check_dim {
+            assert!(avg_out < avg_in, "Frame {} not dimmed! avg_in={:.2}, avg_out={:.2}", review.frame, avg_in, avg_out);
+        } else if let Some(true) = check_bright {
+            if avg_in < 250.0 {
+                assert!(avg_out > avg_in, "Frame {} not brightened! avg_in={:.2}, avg_out={:.2}", review.frame, avg_in, avg_out);
+            }
+        } else if is_identity {
+            // Identity check (if no active effects/filters on this frame)
+            let mut diff_count = 0;
+            for y in (0..spec.composition.height).step_by(step_usize) {
+                for x in (0..spec.composition.width).step_by(step_usize) {
+                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+                    for c in 0..3 {
+                        if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 3 {
+                            diff_count += 1;
+                        }
                     }
                 }
             }
+            let total_sampled_channels = num_samples * 3.0;
+            let diff_ratio = diff_count as f64 / total_sampled_channels;
+            assert!(diff_ratio < 0.05, "Frame {} differs too much from input (diff_ratio={:.4})", review.frame, diff_ratio);
+        } else if is_custom_shader_effect {
+            let mut diff_count = 0;
+            for y in (0..spec.composition.height).step_by(step_usize) {
+                for x in (0..spec.composition.width).step_by(step_usize) {
+                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+                    for c in 0..3 {
+                        if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 3 {
+                            diff_count += 1;
+                        }
+                    }
+                }
+            }
+            let total_sampled_channels = num_samples * 3.0;
+            let diff_ratio = diff_count as f64 / total_sampled_channels;
+            assert!(diff_ratio > 0.05, "Frame {} did not have custom wave effect applied (diff_ratio={:.4} <= 0.05)", review.frame, diff_ratio);
         }
-        let total_sampled_channels = num_samples * 3.0;
-        let diff_ratio = diff_count as f64 / total_sampled_channels;
-        assert!(diff_ratio < 0.05, "Identity output differs too much from input (diff_ratio={:.4})", diff_ratio);
     }
 }
 
@@ -170,50 +345,15 @@ fn test_06_padding_stress() {
 
 #[test]
 fn test_07_movie() {
-    let spec_path = "test_cases/07_movie.json";
-    let binary_path = env!("CARGO_BIN_EXE_render-poc");
-
-    println!("Running binary for movie: {} with spec: {}", binary_path, spec_path);
-
-    let output_path = Path::new("test_cases/outputs/07_movie.mp4");
-    if output_path.exists() {
-        std::fs::remove_file(output_path).expect("Failed to clean up old movie");
-    }
-
-    // Execute the rendering binary
-    let status = Command::new(binary_path)
-        .arg(spec_path)
-        .status()
-        .expect("Failed to run rendering binary");
-
-    assert!(status.success(), "Binary execution failed for movie spec");
-    assert!(output_path.exists(), "Output movie was not created");
-    assert!(output_path.metadata().unwrap().len() > 0, "Output movie is empty");
+    run_test_case("07_movie.json");
 }
 
 #[test]
 fn test_08_movie_audio() {
-    let spec_path = "test_cases/08_movie_audio.json";
-    let binary_path = env!("CARGO_BIN_EXE_render-poc");
-
-    println!("Running binary for movie with audio: {} with spec: {}", binary_path, spec_path);
-
-    let output_path = Path::new("test_cases/outputs/08_movie_audio.mp4");
-    if output_path.exists() {
-        std::fs::remove_file(output_path).expect("Failed to clean up old movie");
-    }
-
-    // Execute the rendering binary
-    let status = Command::new(binary_path)
-        .arg(spec_path)
-        .status()
-        .expect("Failed to run rendering binary");
-
-    assert!(status.success(), "Binary execution failed for movie with audio spec");
-    assert!(output_path.exists(), "Output movie with audio was not created");
-    assert!(output_path.metadata().unwrap().len() > 0, "Output movie is empty");
-
+    run_test_case("08_movie_audio.json");
+    
     // Verify audio stream presence using ffprobe
+    let output_path = Path::new("test_cases/outputs/08_movie_audio.mp4");
     let ffprobe_status = Command::new("ffprobe")
         .args(&[
             "-v", "error",
@@ -229,4 +369,29 @@ fn test_08_movie_audio() {
     } else {
         panic!("Failed to run ffprobe to verify audio");
     }
+}
+
+#[test]
+fn test_09_ripple_relative() {
+    run_test_case("09_ripple_relative.json");
+}
+
+#[test]
+fn test_10_blend_modes() {
+    run_test_case("10_blend_modes.json");
+}
+
+#[test]
+fn test_11_effect_layer() {
+    run_test_case("11_effect_layer.json");
+}
+
+#[test]
+fn test_12_transform_keyframe() {
+    run_test_case("12_transform_keyframe.json");
+}
+
+#[test]
+fn test_13_custom_shader_effect() {
+    run_test_case("13_custom_shader_effect.json");
 }

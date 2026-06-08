@@ -1,0 +1,43 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/10_blend_modes.png",
+  "composition": {
+    "width": 800,
+    "height": 800,
+    "fps": 30,
+    "duration": 2.0
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    }
+  },
+  "tracks": [
+    {
+      "id": "background_track",
+      "clips": [
+        {
+          "id": "background_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 2.0
+        }
+      ]
+    },
+    {
+      "id": "foreground_track",
+      "clips": [
+        {
+          "id": "foreground_solid",
+          "type": "solid",
+          "duration": 2.0,
+          "solid_params": {
+            "color": [0.5, 0.5, 0.5, 0.8]
+          },
+          "blend_mode": "multiply"
+        }
+      ]
+    }
+  ]
+}

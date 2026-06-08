@@ -1,11 +1,11 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/02_grayscale.png",
+  "output": "test_cases/outputs/09_ripple_relative.mp4",
   "composition": {
     "width": 800,
     "height": 800,
     "fps": 30,
-    "duration": 2.0
+    "duration": 6.0
   },
   "assets": {
     "input_image": {
@@ -16,15 +16,31 @@
   "tracks": [
     {
       "id": "main_track",
+      "start": 1.0,
       "clips": [
         {
-          "id": "input_clip",
+          "id": "clip_grayscale",
           "type": "media",
           "asset": "input_image",
           "duration": 2.0,
           "effects": [
             {
               "type": "grayscale"
+            }
+          ]
+        },
+        {
+          "id": "clip_dim",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 2.0,
+          "offset": 1.0,
+          "effects": [
+            {
+              "type": "brightness",
+              "params": {
+                "factor": 0.5
+              }
             }
           ]
         }

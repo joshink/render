@@ -1,14 +1,37 @@
 {
-  "width": 800,
-  "height": 800,
-  "input": "input.jpg",
+  "version": "1.0",
   "output": "test_cases/outputs/04_brightness_bright.png",
-  "effects": [
+  "composition": {
+    "width": 800,
+    "height": 800,
+    "fps": 30,
+    "duration": 2.0
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    }
+  },
+  "tracks": [
     {
-      "effect_type": "brightness",
-      "params": {
-        "factor": 1.5
-      }
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "input_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "brightness",
+              "params": {
+                "factor": 1.5
+              }
+            }
+          ]
+        }
+      ]
     }
   ]
 }

@@ -63,13 +63,13 @@ Below is a complete, production-ready example of the input JSON specification:
   },
   "tracks": [
     {
-      "id": "overlay_track",
+      "id": "logo_track",
+      "start": 1.0,
       "clips": [
         {
           "id": "logo_overlay",
           "type": "media",
           "asset": "watermark_image",
-          "start": 1.0,
           "duration": 10.0,
           "scale_mode": "fit",
           "transform": {
@@ -79,24 +79,29 @@ Below is a complete, production-ready example of the input JSON specification:
             },
             // Polymorphic: Scale is static (shorthand format)
             "scale": [0.1, 0.1],
-            // Polymorphic: Rotation is animated via keyframes using custom Bezier curves
+            // Polymorphic: Rotation is animated via keyframes using custom Bezier curves (relative to clip start)
             "rotation": [
-              { "time": 1.0, "value": 0.0 },
-              { "time": 11.0, "value": 360.0, "easing": [0.25, 0.1, 0.25, 1.0] }
+              { "time": 0.0, "value": 0.0 },
+              { "time": 10.0, "value": 360.0, "easing": [0.25, 0.1, 0.25, 1.0] }
             ],
-            // Polymorphic: Opacity is animated via keyframes
+            // Polymorphic: Opacity is animated via keyframes (relative to clip start)
             "opacity": [
-              { "time": 1.0, "value": 0.0, "easing": "ease_out" },
-              { "time": 2.0, "value": 0.8 },
-              { "time": 10.0, "value": 0.8, "easing": "ease_in" },
-              { "time": 11.0, "value": 0.0 }
+              { "time": 0.0, "value": 0.0, "easing": "ease_out" },
+              { "time": 1.0, "value": 0.8 },
+              { "time": 9.0, "value": 0.8, "easing": "ease_in" },
+              { "time": 10.0, "value": 0.0 }
             ]
           }
-        },
+        }
+      ]
+    },
+    {
+      "id": "title_track",
+      "start": 2.0,
+      "clips": [
         {
           "id": "title_text",
           "type": "text",
-          "start": 2.0,
           "duration": 5.0,
           "text_params": {
             "text": "Ocean Voyage",
@@ -108,12 +113,12 @@ Below is a complete, production-ready example of the input JSON specification:
             "color": [1.0, 1.0, 1.0, 1.0],
             // Variable Font axes
             "axes": {
-              // Polymorphic: Weight animate over time (thin to heavy bold)
+              // Polymorphic: Weight animate over time (relative to clip start)
               "wght": [
-                { "time": 2.0, "value": 100.0, "easing": "ease_in_out" },
-                { "time": 4.0, "value": 900.0 }
+                { "time": 0.0, "value": 100.0, "easing": "ease_in_out" },
+                { "time": 2.0, "value": 900.0 }
               ],
-              // Polymorphic: Width varies via a dynamic mathematical sin wave script
+              // Polymorphic: Width varies via a dynamic mathematical sin wave script (relative to clip start)
               "wdth": {
                 "expression": "100.0 + 50.0 * sin(clip.time * 2.0 * pi())"
               }
@@ -128,8 +133,7 @@ Below is a complete, production-ready example of the input JSON specification:
             "opacity": 1.0
           }
         }
-      ],
-      "transitions": []
+      ]
     },
     {
       "id": "main_track",
@@ -138,7 +142,6 @@ Below is a complete, production-ready example of the input JSON specification:
           "id": "video_clip_1",
           "type": "media",
           "asset": "background_video",
-          "start": 0.0,
           "duration": 6.0,
           "scale_mode": "fill",
           "effects": [
@@ -158,7 +161,6 @@ Below is a complete, production-ready example of the input JSON specification:
         {
           "id": "solid_color_clip",
           "type": "solid",
-          "start": 5.0,
           "duration": 5.0,
           "solid_params": {
             "color": [0.1, 0.1, 0.2, 1.0]
@@ -170,7 +172,6 @@ Below is a complete, production-ready example of the input JSON specification:
           "id": "transition_1",
           "type": "custom_shader",
           "shader": "custom_transition_shader",
-          "start": 5.0,
           "duration": 1.0,
           "from": "video_clip_1",
           "to": "solid_color_clip"
@@ -197,7 +198,7 @@ Describes the output dimensions and frame metrics.
 
 ### 3.3. Asset Library (`assets`)
 Declares external media files or script resources. The keys represent unique IDs used elsewhere in the timeline.
-*   `type` (string, required): One of `"video"`, `"image"`, `"shader"`, or `"font"`.
+*   `type` (string, required): One of `"video"`, `"image"`, `"audio"`, `"shader"`, or `"font"`.
 *   `provider` (string, optional, required for `"font"`):
     *   `"file"`: Loaded from a local filesystem path.
     *   `"system"`: Loaded by name from local operating system font libraries.
@@ -207,18 +208,32 @@ Declares external media files or script resources. The keys represent unique IDs
 ### 3.4. Tracks (`tracks`)
 An ordered array of parallel timelines. Lower indices are rendered first (background), while higher indices overlay on top (foreground).
 *   `id` (string, required): Unique identifier for the track.
-*   `clips` (array of Clip, required): List of clips scheduled on this track.
-*   `transitions` (array of Transition, optional): List of transitions occurring between overlapping clips on this track.
+*   `start` (float, optional, defaults to `0.0`): The start offset of this track in seconds. The first clip in the track begins rendering at this offset.
+*   `clips` (array of Clip, required): List of clips scheduled on this track. Clips are rendered sequentially and must be adjacent (no gaps or overlaps are allowed within a single track).
+*   `transitions` (array of Transition, optional): List of transitions occurring between adjacent clips on this track.
 
-### 3.5. Clips (`clips`)
+### 3.5. Audio Tracks (`audio_tracks`)
+An optional array of parallel audio timelines.
+*   `id` (string, required): Unique identifier for the audio track.
+*   `start` (float, optional, defaults to `0.0`): The start offset of this audio track in seconds.
+*   `clips` (array of AudioClip, required): List of audio clips scheduled on this track. Clips are played sequentially and are adjacent.
+
+### 3.6. Audio Clips (`clips` in `audio_tracks`)
+Audio clips represent intervals of time when audio assets are played.
+*   `id` (string, required): Unique identifier for the clip.
+*   `asset` (string, required): The ID of the asset (audio/video) in the global library.
+*   `duration` (float, required): Playback duration of the audio clip in seconds.
+*   `offset` (float, optional, defaults to `0.0`): The gap or empty space in seconds before this clip starts, relative to the end of the previous clip (or track start for the first clip). Enforced to be non-negative.
+
+### 3.7. Clips (`clips`)
 Clips represent intervals of time on a track when content is rendered.
 *   `id` (string, required): Unique identifier for the clip.
 *   `type` (string, required): Specifies the content type:
     *   `"media"`: Renders an external video or image asset.
     *   `"solid"`: Renders a flat, solid-colored canvas.
     *   `"text"`: Renders a vector/rasterized text overlay.
-*   `start` (float, required): Start time on the composition timeline in seconds.
 *   `duration` (float, required): Playback duration of the clip in seconds.
+*   `offset` (float, optional, defaults to `0.0`): The gap or empty space in seconds before this clip starts, relative to the end of the previous clip (or track start for the first clip). Enforced to be non-negative.
 *   `asset` (string, required for `"media"`): The ID of the asset (image/video) in the global library.
 *   `scale_mode` (string, optional for `"media"`, defaults to `"fit"`):
     *   `"fit"`: Scales the asset to fit completely inside the composition viewport while maintaining its aspect ratio.
