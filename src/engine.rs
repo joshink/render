@@ -4,7 +4,7 @@
 //! compute shaders (compositor, built-in effects, and custom user shaders),
 //! and reads the final pixel buffer back to the CPU for encoding.
 
-use crate::config::{RenderSpec, ClipType, CompositorParams, Clip};
+use crate::config::{RenderSpec, ClipType, CompositorParams, Clip, Effect};
 use log::{error};
 
 /// GPU-side uniform block for custom effect shaders.
@@ -157,18 +157,35 @@ impl RenderContext {
                         );
                     }
                     ClipType::Effect => {
-                        let progress = (clip_time / clip.duration).clamp(0.0, 1.0);
-                        if let Some(ref shader_id) = clip.shader {
-                            self.dispatch_custom_effect(
-                                clip, shader_id, time, clip_time, progress, spec,
-                                &mut current_input, &mut current_output,
-                            );
+                        let expanded_effects = if let Some(ref shader_id) = clip.shader {
+                            vec![Effect {
+                                effect_type: "custom_shader".to_string(),
+                                shader: Some(shader_id.clone()),
+                                preset: None,
+                                params: clip.params.clone(),
+                            }]
+                        } else if clip.preset.is_some() {
+                            let temp_effect = Effect {
+                                effect_type: "preset".to_string(),
+                                shader: None,
+                                preset: clip.preset.clone(),
+                                params: clip.params.clone(),
+                            };
+                            spec.expand_effects(&[temp_effect], clip_time, spec.composition.width, spec.composition.height, 0)
                         } else {
-                            self.dispatch_builtin_effects(
-                                clip, time, clip_time, spec, is_movie,
-                                &mut current_input, &mut current_output,
-                            );
-                        }
+                            spec.expand_effects(&clip.effects, clip_time, spec.composition.width, spec.composition.height, 0)
+                        };
+
+                        self.dispatch_expanded_effects(
+                            &expanded_effects,
+                            time,
+                            clip_time,
+                            clip.duration,
+                            spec,
+                            is_movie,
+                            &mut current_input,
+                            &mut current_output,
+                        );
                     }
                     _ => {}
                 }
@@ -233,7 +250,8 @@ impl RenderContext {
         let rotation = clip.eval_rotation(clip_time, spec.composition.width, spec.composition.height);
         let opacity = clip.eval_opacity(clip_time, spec.composition.width, spec.composition.height);
         let blend_mode_u32 = clip.blend_mode.as_ref().map(|b| b.clone().as_u32()).unwrap_or(0);
-        let (grayscale, brightness) = clip.eval_built_in_effects(clip_time, is_movie);
+        let expanded_effects = spec.expand_effects(&clip.effects, clip_time, spec.composition.width, spec.composition.height, 0);
+        let (grayscale, brightness) = crate::config::eval_built_in_effects_from_effects(&expanded_effects, clip_time, is_movie);
 
         let (clip_type_u32, solid_color) = match clip.clip_type {
             ClipType::Solid => {
@@ -309,7 +327,7 @@ impl RenderContext {
     /// the pipeline was not registered at startup.
     fn dispatch_custom_effect<'a>(
         &self,
-        clip: &Clip,
+        effect: &Effect,
         shader_id: &str,
         time: f32,
         clip_time: f32,
@@ -329,7 +347,7 @@ impl RenderContext {
             };
             self.queue.write_buffer(&self.engine_params_buffer, 0, bytemuck::bytes_of(&engine_params));
 
-            let custom_params_data = if let Some(ref p) = clip.params {
+            let custom_params_data = if let Some(ref p) = effect.params {
                 pack_custom_params(p)
             } else {
                 vec![0u8; 16]
@@ -387,7 +405,7 @@ impl RenderContext {
     /// feedback ping-pong pair based on frame index, and dispatches.
     fn dispatch_builtin_effects<'a>(
         &self,
-        clip: &Clip,
+        effects: &[Effect],
         time: f32,
         clip_time: f32,
         spec: &RenderSpec,
@@ -395,10 +413,12 @@ impl RenderContext {
         current_input: &mut &'a wgpu::Texture,
         current_output: &mut &'a wgpu::Texture,
     ) {
-        let built_in_params = clip.eval_shader_params(clip_time, spec.composition.width, spec.composition.height, time, is_movie);
+        let built_in_params = crate::config::eval_shader_params_from_effects(
+            effects, clip_time, spec.composition.width, spec.composition.height, time, is_movie
+        );
         self.queue.write_buffer(&self.built_in_params_buffer, 0, bytemuck::bytes_of(&built_in_params));
 
-        let depth_texture_ref = clip.get_depth_map_asset_id()
+        let depth_texture_ref = crate::config::get_depth_map_asset_id_from_effects(effects)
             .and_then(|asset_id| self.gpu_textures.get(&asset_id))
             .unwrap_or(&self.transparent_texture);
         let depth_view = create_default_view(depth_texture_ref);
@@ -457,6 +477,66 @@ impl RenderContext {
         }
         self.queue.submit(Some(encoder.finish()));
         std::mem::swap(current_input, current_output);
+    }
+
+    fn dispatch_expanded_effects<'a>(
+        &self,
+        effects: &[Effect],
+        time: f32,
+        clip_time: f32,
+        duration: f32,
+        spec: &RenderSpec,
+        is_movie: bool,
+        current_input: &mut &'a wgpu::Texture,
+        current_output: &mut &'a wgpu::Texture,
+    ) {
+        let mut built_in_accumulator = Vec::new();
+        let progress = (clip_time / duration).clamp(0.0, 1.0);
+
+        for effect in effects {
+            if let Some(ref shader_id) = effect.shader {
+                // If there are accumulated built-in effects, dispatch them first
+                if !built_in_accumulator.is_empty() {
+                    self.dispatch_builtin_effects(
+                        &built_in_accumulator,
+                        time,
+                        clip_time,
+                        spec,
+                        is_movie,
+                        current_input,
+                        current_output,
+                    );
+                    built_in_accumulator.clear();
+                }
+                // Dispatch the custom effect
+                self.dispatch_custom_effect(
+                    effect,
+                    shader_id,
+                    time,
+                    clip_time,
+                    progress,
+                    spec,
+                    current_input,
+                    current_output,
+                );
+            } else {
+                // It is a built-in effect, accumulate it
+                built_in_accumulator.push(effect.clone());
+            }
+        }
+
+        // Dispatch any remaining built-in effects
+        if !built_in_accumulator.is_empty() {
+            self.dispatch_builtin_effects(
+                &built_in_accumulator,
+                time,
+                clip_time,
+                spec,
+                is_movie,
+                current_input,
+                current_output,
+            );
+        }
     }
 
     /// Copies the final composited texture back to the CPU and returns the

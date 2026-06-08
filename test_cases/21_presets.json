@@ -1,0 +1,68 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/21_presets.png",
+  "composition": {
+    "width": 800,
+    "height": 800,
+    "fps": 30,
+    "duration": 2.0
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    }
+  },
+  "presets": [
+    {
+      "name": "Dreamy Glow",
+      "inputs": [
+        { "name": "blur_radius", "type": "float", "defaultValue": 5.0 },
+        { "name": "glow_intensity", "type": "float", "defaultValue": 1.0 }
+      ],
+      "filters": [
+        {
+          "type": "blur",
+          "params": {
+            "radius": "$blur_radius"
+          }
+        },
+        {
+          "type": "glow",
+          "params": {
+            "intensity": "$glow_intensity",
+            "radius": 4.0,
+            "threshold": 0.4
+          }
+        }
+      ]
+    }
+  ],
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "input_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 2.0
+        }
+      ]
+    },
+    {
+      "id": "effect_track",
+      "clips": [
+        {
+          "id": "presets_effect",
+          "type": "effect",
+          "preset": "Dreamy Glow",
+          "duration": 2.0,
+          "params": {
+            "glow_intensity": 1.2
+          }
+        }
+      ]
+    }
+  ]
+}

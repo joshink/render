@@ -104,7 +104,7 @@ fn run_test_case(spec_name: &str) {
     let is_transform_keyframe = spec_name == "12_transform_keyframe.json";
     let is_custom_shader_effect = spec_name == "13_custom_shader_effect.json";
     let is_hsl_adjust = spec_name == "14_hsl_adjust.json";
-    let is_blur_glow = spec_name == "15_blur_glow.json";
+    let is_blur_glow = spec_name == "15_blur_glow.json" || spec_name == "21_presets.json";
     let is_film_effects = spec_name == "16_film_effects.json";
     let is_depth_blur = spec_name == "17_depth_blur.json";
     let is_fluid_flow = spec_name == "18_fluid_flow.json";
@@ -506,5 +506,10 @@ fn test_19_pixelation() {
 #[test]
 fn test_20_chromatic_aberration() {
     run_test_case("20_chromatic_aberration.json");
+}
+
+#[test]
+fn test_21_presets() {
+    run_test_case("21_presets.json");
 }
 

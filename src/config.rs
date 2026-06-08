@@ -32,8 +32,26 @@ pub struct RenderSpec {
     pub output: String,
     pub composition: Composition,
     pub assets: HashMap<String, Asset>,
+    #[serde(default)]
+    pub presets: Option<Vec<PresetDef>>,
     pub tracks: Vec<Track>,
     pub audio_tracks: Option<Vec<AudioTrack>>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct PresetInput {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub input_type: String,
+    #[serde(rename = "defaultValue")]
+    pub default_value: serde_json::Value,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct PresetDef {
+    pub name: String,
+    pub inputs: Vec<PresetInput>,
+    pub filters: Vec<Effect>,
 }
 
 /// Output dimensions, frame rate, and total duration of the composition.
@@ -139,6 +157,8 @@ pub struct Clip {
     #[serde(default)]
     pub shader: Option<String>,
     #[serde(default)]
+    pub preset: Option<String>,
+    #[serde(default)]
     pub blend_mode: Option<BlendMode>,
     #[serde(default)]
     pub params: Option<HashMap<String, serde_json::Value>>,
@@ -177,6 +197,8 @@ pub struct Effect {
     #[serde(rename = "type")]
     pub effect_type: String,
     pub shader: Option<String>,
+    #[serde(default)]
+    pub preset: Option<String>,
     #[serde(default)]
     pub params: Option<HashMap<String, serde_json::Value>>,
 }
@@ -322,6 +344,129 @@ fn read_effect_float(effect: &Effect, key: &str, clip_time: f32, w: u32, h: u32,
 // ---------------------------------------------------------------------------
 
 impl RenderSpec {
+    /// Recursively expands all presets in a list of effects into concrete (non-preset) effects.
+    pub fn expand_effects(
+        &self,
+        effects: &[Effect],
+        clip_time: f32,
+        w: u32,
+        h: u32,
+        depth: usize,
+    ) -> Vec<Effect> {
+        if depth > 5 {
+            return Vec::new();
+        }
+        let mut expanded = Vec::new();
+        for effect in effects {
+            if effect.effect_type == "preset" || effect.preset.is_some() {
+                let preset_name = effect.preset.as_ref().unwrap_or(&effect.effect_type);
+                let preset_def = self.presets.as_ref().and_then(|list| {
+                    list.iter().find(|p| &p.name == preset_name)
+                });
+                if let Some(def) = preset_def {
+                    let mut resolved_inputs = HashMap::new();
+                    for input in &def.inputs {
+                        let val = effect.params.as_ref()
+                            .and_then(|p| p.get(&input.name))
+                            .unwrap_or(&input.default_value);
+                        
+                        let resolved_val = match input.input_type.as_str() {
+                            "float" => {
+                                let f = evaluate_float(val, clip_time, w, h, 0.0);
+                                serde_json::Value::from(f)
+                            }
+                            "vec2" => {
+                                let v = evaluate_vec2(val, clip_time, w, h, [0.0, 0.0]);
+                                serde_json::Value::from(v.to_vec())
+                            }
+                            _ => {
+                                if let Some(f) = val.as_f64() {
+                                    serde_json::Value::from(f)
+                                } else {
+                                    val.clone()
+                                }
+                            }
+                        };
+                        resolved_inputs.insert(input.name.clone(), resolved_val);
+                    }
+
+                    let mut sub_filters = Vec::new();
+                    for filter in &def.filters {
+                        let mut resolved_filter = filter.clone();
+                        if let Some(ref params) = filter.params {
+                            let mut resolved_params = HashMap::new();
+                            for (key, val) in params {
+                                let new_val = self.substitute_value(val, &resolved_inputs, clip_time, w, h);
+                                resolved_params.insert(key.clone(), new_val);
+                            }
+                            resolved_filter.params = Some(resolved_params);
+                        }
+                        sub_filters.push(resolved_filter);
+                    }
+
+                    let expanded_sub = self.expand_effects(&sub_filters, clip_time, w, h, depth + 1);
+                    expanded.extend(expanded_sub);
+                } else {
+                    log::error!("Preset '{}' not found in RenderSpec presets!", preset_name);
+                }
+            } else {
+                expanded.push(effect.clone());
+            }
+        }
+        expanded
+    }
+
+    fn substitute_value(
+        &self,
+        val: &serde_json::Value,
+        resolved_inputs: &HashMap<String, serde_json::Value>,
+        clip_time: f32,
+        w: u32,
+        h: u32,
+    ) -> serde_json::Value {
+        match val {
+            serde_json::Value::String(s) => {
+                if s.starts_with('$') {
+                    let name = &s[1..];
+                    if let Some(resolved) = resolved_inputs.get(name) {
+                        return resolved.clone();
+                    }
+                }
+                let mut replaced_str = s.clone();
+                for (name, resolved) in resolved_inputs {
+                    let pattern = format!("${}", name);
+                    if replaced_str.contains(&pattern) {
+                        let replacement = match resolved {
+                            serde_json::Value::Number(num) => num.to_string(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            serde_json::Value::Array(arr) => {
+                                format!("{:?}", arr)
+                            }
+                            _ => resolved.to_string(),
+                        };
+                        replaced_str = replaced_str.replace(&pattern, &replacement);
+                    }
+                }
+                serde_json::Value::String(replaced_str)
+            }
+            serde_json::Value::Object(obj) => {
+                let mut new_obj = serde_json::Map::new();
+                for (k, v) in obj {
+                    new_obj.insert(k.clone(), self.substitute_value(v, resolved_inputs, clip_time, w, h));
+                }
+                serde_json::Value::Object(new_obj)
+            }
+            serde_json::Value::Array(arr) => {
+                let mut new_arr = Vec::new();
+                for item in arr {
+                    new_arr.push(self.substitute_value(item, resolved_inputs, clip_time, w, h));
+                }
+                serde_json::Value::Array(new_arr)
+            }
+            _ => val.clone(),
+        }
+    }
+
     pub fn get_input_path(&self) -> Option<String> {
         for track in &self.tracks {
             for clip in &track.clips {
@@ -462,150 +607,168 @@ impl Clip {
     }
 
     pub fn eval_built_in_effects(&self, clip_time: f32, is_movie: bool) -> (u32, f32) {
-        let mut grayscale = 0u32;
-        let mut brightness = 1.0f32;
-        for effect in &self.effects {
-            match effect.effect_type.as_str() {
-                "grayscale" => {
-                    grayscale = 1;
-                    if is_movie {
-                        grayscale = if (clip_time * std::f32::consts::PI).sin() > 0.0 { 1 } else { 0 };
-                    }
-                }
-                "brightness" => {
-                    if let Some(ref params) = effect.params {
-                        if let Some(factor_val) = params.get("factor") {
-                            if let Some(factor) = factor_val.as_f64() {
-                                brightness = factor as f32;
-                            }
-                        }
-                    }
-                    if is_movie {
-                        brightness = brightness
-                            * (1.0 + BRIGHTNESS_OSCILLATION_AMPLITUDE
-                                * (clip_time * BRIGHTNESS_OSCILLATION_FREQ * std::f32::consts::PI).sin());
-                    }
-                }
-                _ => {}
-            }
-        }
-        (grayscale, brightness)
+        eval_built_in_effects_from_effects(&self.effects, clip_time, is_movie)
     }
 
     pub fn get_depth_map_asset_id(&self) -> Option<String> {
-        for effect in &self.effects {
-            if effect.effect_type == "depth_blur" {
-                if let Some(ref params) = effect.params {
-                    if let Some(val) = params.get("depth_map") {
-                        if let Some(s) = val.as_str() {
-                            return Some(s.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        None
+        get_depth_map_asset_id_from_effects(&self.effects)
     }
 
     pub fn eval_shader_params(&self, clip_time: f32, comp_width: u32, comp_height: u32, time: f32, is_movie: bool) -> ShaderParams {
-        let mut params = ShaderParams {
-            grayscale_enabled: 0,
-            brightness_factor: 1.0,
-            contrast_factor: 1.0,
-            saturation_factor: 1.0,
-            hue_rotate_angle: 0.0,
-            blur_radius: 0.0,
-            glow_intensity: 0.0,
-            glow_radius: 0.0,
-            glow_threshold: 0.5,
-            film_grain_amount: 0.0,
-            film_grain_speed: 1.0,
-            film_flicker_amount: 0.0,
-            film_flicker_speed: 1.0,
-            depth_blur_focus_x: 0.5,
-            depth_blur_focus_y: 0.5,
-            depth_blur_focus_radius: 0.2,
-            depth_blur_near_blur: 0.0,
-            depth_blur_far_blur: 0.0,
-            depth_blur_use_map: 0,
-            flow_amount: 0.0,
-            flow_speed: 1.0,
-            flow_decay: 0.95,
-            time,
-            clip_time,
-            width: comp_width,
-            height: comp_height,
-            _padding: [0, 0],
-        };
+        eval_shader_params_from_effects(&self.effects, clip_time, comp_width, comp_height, time, is_movie)
+    }
+}
 
-        for effect in &self.effects {
-            match effect.effect_type.as_str() {
-                "grayscale" => {
-                    let mut enabled = read_effect_float(effect, "enabled", clip_time, comp_width, comp_height, 1.0) > 0.5;
-                    if is_movie {
-                        enabled = enabled && (clip_time * std::f32::consts::PI).sin() > 0.0;
-                    }
-                    params.grayscale_enabled = if enabled { 1 } else { 0 };
+pub fn eval_built_in_effects_from_effects(effects: &[Effect], clip_time: f32, is_movie: bool) -> (u32, f32) {
+    let mut grayscale = 0u32;
+    let mut brightness = 1.0f32;
+    for effect in effects {
+        match effect.effect_type.as_str() {
+            "grayscale" => {
+                grayscale = 1;
+                if is_movie {
+                    grayscale = if (clip_time * std::f32::consts::PI).sin() > 0.0 { 1 } else { 0 };
                 }
-                "brightness" => {
-                    let mut factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
-                    if is_movie {
-                        factor = factor
-                            * (1.0 + BRIGHTNESS_OSCILLATION_AMPLITUDE
-                                * (clip_time * BRIGHTNESS_OSCILLATION_FREQ * std::f32::consts::PI).sin());
-                    }
-                    params.brightness_factor = factor;
-                }
-                "contrast" => {
-                    params.contrast_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
-                }
-                "saturation" => {
-                    params.saturation_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
-                }
-                "hue_rotate" => {
-                    params.hue_rotate_angle = read_effect_float(effect, "angle", clip_time, comp_width, comp_height, 0.0);
-                }
-                "blur" => {
-                    params.blur_radius = read_effect_float(effect, "radius", clip_time, comp_width, comp_height, 0.0);
-                }
-                "glow" => {
-                    params.glow_intensity = read_effect_float(effect, "intensity", clip_time, comp_width, comp_height, 0.0);
-                    params.glow_radius = read_effect_float(effect, "radius", clip_time, comp_width, comp_height, 0.0);
-                    params.glow_threshold = read_effect_float(effect, "threshold", clip_time, comp_width, comp_height, 0.5);
-                }
-                "film_grain" => {
-                    params.film_grain_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
-                    params.film_grain_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
-                }
-                "film_flicker" => {
-                    params.film_flicker_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
-                    params.film_flicker_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
-                }
-                "depth_blur" => {
-                    params.depth_blur_focus_x = read_effect_float(effect, "focus_x", clip_time, comp_width, comp_height, 0.5);
-                    params.depth_blur_focus_y = read_effect_float(effect, "focus_y", clip_time, comp_width, comp_height, 0.5);
-                    params.depth_blur_focus_radius = read_effect_float(effect, "focus_radius", clip_time, comp_width, comp_height, 0.2);
-                    params.depth_blur_near_blur = read_effect_float(effect, "near_blur", clip_time, comp_width, comp_height, 0.0);
-                    params.depth_blur_far_blur = read_effect_float(effect, "far_blur", clip_time, comp_width, comp_height, 0.0);
-                    // depth_map is a string asset reference, not a float — handle separately.
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("depth_map") {
-                            if val.as_str().is_some() {
-                                params.depth_blur_use_map = 1;
-                            }
+            }
+            "brightness" => {
+                if let Some(ref params) = effect.params {
+                    if let Some(factor_val) = params.get("factor") {
+                        if let Some(factor) = factor_val.as_f64() {
+                            brightness = factor as f32;
                         }
                     }
                 }
-                "flow" => {
-                    params.flow_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
-                    params.flow_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
-                    params.flow_decay = read_effect_float(effect, "decay", clip_time, comp_width, comp_height, 0.95);
+                if is_movie {
+                    brightness = brightness
+                        * (1.0 + BRIGHTNESS_OSCILLATION_AMPLITUDE
+                            * (clip_time * BRIGHTNESS_OSCILLATION_FREQ * std::f32::consts::PI).sin());
                 }
-                _ => {}
+            }
+            _ => {}
+        }
+    }
+    (grayscale, brightness)
+}
+
+pub fn get_depth_map_asset_id_from_effects(effects: &[Effect]) -> Option<String> {
+    for effect in effects {
+        if effect.effect_type == "depth_blur" {
+            if let Some(ref params) = effect.params {
+                if let Some(val) = params.get("depth_map") {
+                    if let Some(s) = val.as_str() {
+                        return Some(s.to_string());
+                    }
+                }
             }
         }
-        params
     }
+    None
+}
+
+pub fn eval_shader_params_from_effects(
+    effects: &[Effect],
+    clip_time: f32,
+    comp_width: u32,
+    comp_height: u32,
+    time: f32,
+    is_movie: bool,
+) -> ShaderParams {
+    let mut params = ShaderParams {
+        grayscale_enabled: 0,
+        brightness_factor: 1.0,
+        contrast_factor: 1.0,
+        saturation_factor: 1.0,
+        hue_rotate_angle: 0.0,
+        blur_radius: 0.0,
+        glow_intensity: 0.0,
+        glow_radius: 0.0,
+        glow_threshold: 0.5,
+        film_grain_amount: 0.0,
+        film_grain_speed: 1.0,
+        film_flicker_amount: 0.0,
+        film_flicker_speed: 1.0,
+        depth_blur_focus_x: 0.5,
+        depth_blur_focus_y: 0.5,
+        depth_blur_focus_radius: 0.2,
+        depth_blur_near_blur: 0.0,
+        depth_blur_far_blur: 0.0,
+        depth_blur_use_map: 0,
+        flow_amount: 0.0,
+        flow_speed: 1.0,
+        flow_decay: 0.95,
+        time,
+        clip_time,
+        width: comp_width,
+        height: comp_height,
+        _padding: [0, 0],
+    };
+
+    for effect in effects {
+        match effect.effect_type.as_str() {
+            "grayscale" => {
+                let mut enabled = read_effect_float(effect, "enabled", clip_time, comp_width, comp_height, 1.0) > 0.5;
+                if is_movie {
+                    enabled = enabled && (clip_time * std::f32::consts::PI).sin() > 0.0;
+                }
+                params.grayscale_enabled = if enabled { 1 } else { 0 };
+            }
+            "brightness" => {
+                let mut factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
+                if is_movie {
+                    factor = factor
+                        * (1.0 + BRIGHTNESS_OSCILLATION_AMPLITUDE
+                            * (clip_time * BRIGHTNESS_OSCILLATION_FREQ * std::f32::consts::PI).sin());
+                }
+                params.brightness_factor = factor;
+            }
+            "contrast" => {
+                params.contrast_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
+            }
+            "saturation" => {
+                params.saturation_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
+            }
+            "hue_rotate" => {
+                params.hue_rotate_angle = read_effect_float(effect, "angle", clip_time, comp_width, comp_height, 0.0);
+            }
+            "blur" => {
+                params.blur_radius = read_effect_float(effect, "radius", clip_time, comp_width, comp_height, 0.0);
+            }
+            "glow" => {
+                params.glow_intensity = read_effect_float(effect, "intensity", clip_time, comp_width, comp_height, 0.0);
+                params.glow_radius = read_effect_float(effect, "radius", clip_time, comp_width, comp_height, 0.0);
+                params.glow_threshold = read_effect_float(effect, "threshold", clip_time, comp_width, comp_height, 0.5);
+            }
+            "film_grain" => {
+                params.film_grain_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
+                params.film_grain_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
+            }
+            "film_flicker" => {
+                params.film_flicker_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
+                params.film_flicker_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
+            }
+            "depth_blur" => {
+                params.depth_blur_focus_x = read_effect_float(effect, "focus_x", clip_time, comp_width, comp_height, 0.5);
+                params.depth_blur_focus_y = read_effect_float(effect, "focus_y", clip_time, comp_width, comp_height, 0.5);
+                params.depth_blur_focus_radius = read_effect_float(effect, "focus_radius", clip_time, comp_width, comp_height, 0.2);
+                params.depth_blur_near_blur = read_effect_float(effect, "near_blur", clip_time, comp_width, comp_height, 0.0);
+                params.depth_blur_far_blur = read_effect_float(effect, "far_blur", clip_time, comp_width, comp_height, 0.0);
+                if let Some(ref map) = effect.params {
+                    if let Some(val) = map.get("depth_map") {
+                        if val.as_str().is_some() {
+                            params.depth_blur_use_map = 1;
+                        }
+                    }
+                }
+            }
+            "flow" => {
+                params.flow_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
+                params.flow_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
+                params.flow_decay = read_effect_float(effect, "decay", clip_time, comp_width, comp_height, 0.95);
+            }
+            _ => {}
+        }
+    }
+    params
 }
 
 // ---------------------------------------------------------------------------
