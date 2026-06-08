@@ -173,6 +173,30 @@ fn run_test_case(spec_name: &str) {
             } else if review.explanation.contains("Track 'main_track' - Clip 'clip_dim' starts") {
                 check_dim = Some(true);
             }
+        } else if spec_name == "09_tactile_transitions.json" {
+            let t = review.timestamp;
+            if (t - 2.0).abs() < 0.1 {
+                // Flash peak luma check
+                let mut total_luma = 0.0;
+                let mut count = 0.0;
+                for y in (0..800).step_by(20) {
+                    for x in (0..800).step_by(20) {
+                        let p = out_img.get_pixel(x, y).to_rgba();
+                        total_luma += (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0;
+                        count += 1.0;
+                    }
+                }
+                let avg_luma = total_luma / count;
+                assert!(avg_luma > 200.0, "Flash peak luma too low: {}", avg_luma);
+            } else if (t - 4.0).abs() < 0.1 {
+                // Focus blur midpoint - should be a mix of green and blue
+                let pixel = out_img.get_pixel(400, 400).to_rgba();
+                assert!(pixel[1] > 30 && pixel[2] > 30, "Focus midpoint not mixed green/blue: {:?}", pixel);
+            } else if (t - 6.0).abs() < 0.1 {
+                // Slide switch settled on white/grey
+                let pixel = out_img.get_pixel(400, 400).to_rgba();
+                assert!(pixel[0] > 100 && (pixel[0] as i32 - pixel[1] as i32).abs() < 20, "Slide switch not settled on white/grey: {:?}", pixel);
+            }
         }
 
         // Perform pixel checks
@@ -438,5 +462,10 @@ fn test_07_ripple_relative() {
 #[test]
 fn test_08_text_layout() {
     run_test_case("08_text_layout.json");
+}
+
+#[test]
+fn test_09_tactile_transitions() {
+    run_test_case("09_tactile_transitions.json");
 }
 

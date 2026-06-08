@@ -1,0 +1,104 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/09_tactile_transitions.mp4",
+  "composition": {
+    "width": 800,
+    "height": 800,
+    "fps": 30,
+    "duration": 8.0
+  },
+  "assets": {
+    "flash_burn_shader": {
+      "type": "shader",
+      "path": "shaders/flash_burn.wgsl"
+    },
+    "focus_in_shader": {
+      "type": "shader",
+      "path": "shaders/focus_in.wgsl"
+    },
+    "slide_switch_shader": {
+      "type": "shader",
+      "path": "shaders/slide_switch.wgsl"
+    }
+  },
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "red_clip",
+          "type": "solid",
+          "duration": 2.0,
+          "solid_params": {
+            "color": [0.8, 0.2, 0.2, 1.0]
+          }
+        },
+        {
+          "id": "green_clip",
+          "type": "solid",
+          "duration": 2.0,
+          "solid_params": {
+            "color": [0.2, 0.8, 0.2, 1.0]
+          }
+        },
+        {
+          "id": "blue_clip",
+          "type": "solid",
+          "duration": 2.0,
+          "solid_params": {
+            "color": [0.2, 0.2, 0.8, 1.0]
+          }
+        },
+        {
+          "id": "white_clip",
+          "type": "solid",
+          "duration": 2.0,
+          "solid_params": {
+            "color": [0.7, 0.7, 0.7, 1.0]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "burn_trans",
+          "type": "custom_shader",
+          "shader": "flash_burn_shader",
+          "start": 1.5,
+          "duration": 1.0,
+          "from": "red_clip",
+          "to": "green_clip",
+          "params": {
+            "burn_intensity": 1.2,
+            "flash_intensity": 0.7
+          }
+        },
+        {
+          "id": "focus_trans",
+          "type": "custom_shader",
+          "shader": "focus_in_shader",
+          "start": 3.5,
+          "duration": 1.0,
+          "from": "green_clip",
+          "to": "blue_clip",
+          "params": {
+            "max_blur": 15.0
+          }
+        },
+        {
+          "id": "slide_trans",
+          "type": "custom_shader",
+          "shader": "slide_switch_shader",
+          "start": 5.5,
+          "duration": 1.0,
+          "from": "blue_clip",
+          "to": "white_clip",
+          "params": {
+            "direction": 1.0,
+            "flicker_intensity": 0.2,
+            "gap_size": 0.12
+          }
+        }
+      ]
+    }
+  ]
+}

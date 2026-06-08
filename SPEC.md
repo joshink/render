@@ -362,6 +362,25 @@ Transitions cross-fade or wipe adjacent clips in a track over a specified overla
 *   `to` (String, Required): Incoming clip ID.
 *   `params` (Map<String, Value>, Optional): Uniform parameters passed to transition shader.
 
+### 3.8.1. Built-in Transition Shaders Library
+
+The engine provides a collection of built-in transitions in the `shaders/` directory. These can be referenced in the transition spec using `type: "custom_shader"` and their corresponding shader asset ID pointing to the built-in WGSL file:
+
+#### A. Flash / Burn In (`"shader": "flash_burn_shader"`)
+Simulates a bright camera exposure flash peaking at the midpoint of the transition, combined with an organic film burn-in hot-spot that expands from the center to reveal the incoming clip.
+*   `flash_intensity` (Float, Default `0.8`): Peak brightness offset of the camera exposure spike.
+*   `burn_intensity` (Float, Default `1.0`): Noise-based boundary perturbation intensity of the expanding burn hotspot.
+
+#### B. Focus Blur / Focus In (`"shader": "focus_in_shader"`)
+Defocuses the outgoing clip and brings the incoming clip into focus, accompanied by a subtle focus breathing zoom effect that mimics real camera optics.
+*   `max_blur` (Float, Default `20.0`): Maximum blur radius in pixels at the peak of defocus.
+
+#### C. 35mm Slide Projector Switching (`"shader": "slide_switch_shader"`)
+Emulates the mechanical slide swap in a physical 35mm projector. Features motion blur along the axis of movement, a black separation frame/gap, a damped spring-like snap landing bounce, random lamp flicker, and warm orange light leaks near the gap.
+*   `direction` (Float, Default `0.0`): Movement direction (`0.0` for horizontal slide switch, `1.0` for vertical).
+*   `gap_size` (Float, Default `0.1`): Thickness of the black slide mount frame border relative to screen height/width.
+*   `flicker_intensity` (Float, Default `0.15`): Projector lamp brightness vibration intensity.
+
 ---
 
 ### 3.9. Presets
