@@ -8,7 +8,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::RwLock;
-use evalexpr::{eval_with_context, ContextWithMutableVariables, ContextWithMutableFunctions, HashMapContext};
+use evalexpr::{ContextWithMutableVariables, ContextWithMutableFunctions, HashMapContext};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct EffectMetadata {
@@ -1237,6 +1237,11 @@ pub fn evaluate_padding(value: &serde_json::Value, clip_time: f32, duration: f32
     [p, p, p, p]
 }
 
+use std::sync::{OnceLock, Mutex};
+
+static BASE_CONTEXT: OnceLock<HashMapContext> = OnceLock::new();
+static EXPR_CACHE: OnceLock<Mutex<HashMap<String, evalexpr::Node>>> = OnceLock::new();
+
 fn get_float_helper(val: &evalexpr::Value) -> Result<f64, evalexpr::EvalexprError> {
     if let Ok(f) = val.as_float() {
         Ok(f)
@@ -1247,56 +1252,62 @@ fn get_float_helper(val: &evalexpr::Value) -> Result<f64, evalexpr::EvalexprErro
     }
 }
 
+fn get_base_context() -> &'static HashMapContext {
+    BASE_CONTEXT.get_or_init(|| {
+        let mut context = HashMapContext::new();
+        let _ = context.set_value("pi".into(), (std::f64::consts::PI).into());
+        let _ = context.set_function("pi".into(), evalexpr::Function::new(|_argument| {
+            Ok(evalexpr::Value::Float(std::f64::consts::PI))
+        }));
+
+        let _ = context.set_function("sin".into(), evalexpr::Function::new(|argument| {
+            let val = get_float_helper(argument)?;
+            Ok(evalexpr::Value::Float(val.sin()))
+        }));
+
+        let _ = context.set_function("cos".into(), evalexpr::Function::new(|argument| {
+            let val = get_float_helper(argument)?;
+            Ok(evalexpr::Value::Float(val.cos()))
+        }));
+
+        let _ = context.set_function("tan".into(), evalexpr::Function::new(|argument| {
+            let val = get_float_helper(argument)?;
+            Ok(evalexpr::Value::Float(val.tan()))
+        }));
+
+        let _ = context.set_function("abs".into(), evalexpr::Function::new(|argument| {
+            let val = get_float_helper(argument)?;
+            Ok(evalexpr::Value::Float(val.abs()))
+        }));
+
+        let _ = context.set_function("sqrt".into(), evalexpr::Function::new(|argument| {
+            let val = get_float_helper(argument)?;
+            Ok(evalexpr::Value::Float(val.sqrt()))
+        }));
+
+        let _ = context.set_function("pow".into(), evalexpr::Function::new(|argument| {
+            let tuple = argument.as_tuple()?;
+            if tuple.len() != 2 {
+                return Err(evalexpr::EvalexprError::CustomMessage(format!(
+                    "pow expects exactly 2 arguments, got {}",
+                    tuple.len()
+                )));
+            }
+            let base = get_float_helper(&tuple[0])?;
+            let exponent = get_float_helper(&tuple[1])?;
+            Ok(evalexpr::Value::Float(base.powf(exponent)))
+        }));
+        context
+    })
+}
+
 fn build_eval_context(clip_time: f32, duration: f32, width: u32, height: u32) -> HashMapContext {
-    let mut context = HashMapContext::new();
+    let mut context = get_base_context().clone();
     let _ = context.set_value("time".into(), (clip_time as f64).into());
     let _ = context.set_value("clip_time".into(), (clip_time as f64).into());
     let _ = context.set_value("clip_duration".into(), (duration as f64).into());
     let _ = context.set_value("comp_width".into(), (width as i64).into());
     let _ = context.set_value("comp_height".into(), (height as i64).into());
-    let _ = context.set_value("pi".into(), (std::f64::consts::PI).into());
-    let _ = context.set_function("pi".into(), evalexpr::Function::new(|_argument| {
-        Ok(evalexpr::Value::Float(std::f64::consts::PI))
-    }));
-
-    let _ = context.set_function("sin".into(), evalexpr::Function::new(|argument| {
-        let val = get_float_helper(argument)?;
-        Ok(evalexpr::Value::Float(val.sin()))
-    }));
-
-    let _ = context.set_function("cos".into(), evalexpr::Function::new(|argument| {
-        let val = get_float_helper(argument)?;
-        Ok(evalexpr::Value::Float(val.cos()))
-    }));
-
-    let _ = context.set_function("tan".into(), evalexpr::Function::new(|argument| {
-        let val = get_float_helper(argument)?;
-        Ok(evalexpr::Value::Float(val.tan()))
-    }));
-
-    let _ = context.set_function("abs".into(), evalexpr::Function::new(|argument| {
-        let val = get_float_helper(argument)?;
-        Ok(evalexpr::Value::Float(val.abs()))
-    }));
-
-    let _ = context.set_function("sqrt".into(), evalexpr::Function::new(|argument| {
-        let val = get_float_helper(argument)?;
-        Ok(evalexpr::Value::Float(val.sqrt()))
-    }));
-
-    let _ = context.set_function("pow".into(), evalexpr::Function::new(|argument| {
-        let tuple = argument.as_tuple()?;
-        if tuple.len() != 2 {
-            return Err(evalexpr::EvalexprError::CustomMessage(format!(
-                "pow expects exactly 2 arguments, got {}",
-                tuple.len()
-            )));
-        }
-        let base = get_float_helper(&tuple[0])?;
-        let exponent = get_float_helper(&tuple[1])?;
-        Ok(evalexpr::Value::Float(base.powf(exponent)))
-    }));
-
     context
 }
 
@@ -1312,13 +1323,32 @@ pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, wid
         .replace("clip.time", "clip_time")
         .replace("clip.duration", "clip_duration");
 
-    let context = build_eval_context(clip_time, duration, width, height);
-    let eval_res = eval_with_context(&cleaned_expr, &context);
-    match eval_res {
-        Ok(evalexpr::Value::Float(result)) => return result as f32,
-        Ok(evalexpr::Value::Int(result)) => return result as f32,
-        Ok(other) => log::warn!("eval_with_context returned non-numeric value: {:?}", other),
-        Err(e) => log::debug!("eval_with_context failed for '{}': {:?}", cleaned_expr, e),
+    let cache = EXPR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache_guard = cache.lock().unwrap();
+    let compiled = if let Some(node) = cache_guard.get(&cleaned_expr) {
+        Some(node.clone())
+    } else {
+        match evalexpr::build_operator_tree(&cleaned_expr) {
+            Ok(node) => {
+                cache_guard.insert(cleaned_expr.clone(), node.clone());
+                Some(node)
+            }
+            Err(e) => {
+                log::debug!("evalexpr::build_operator_tree failed for '{}': {:?}", cleaned_expr, e);
+                None
+            }
+        }
+    };
+    drop(cache_guard);
+
+    if let Some(node) = compiled {
+        let context = build_eval_context(clip_time, duration, width, height);
+        match node.eval_with_context(&context) {
+            Ok(evalexpr::Value::Float(result)) => return result as f32,
+            Ok(evalexpr::Value::Int(result)) => return result as f32,
+            Ok(other) => log::warn!("evalexpr Node returned non-numeric value: {:?}", other),
+            Err(e) => log::debug!("evalexpr Node eval failed for '{}': {:?}", cleaned_expr, e),
+        }
     }
 
     // Fallback: try parsing the raw string as a number

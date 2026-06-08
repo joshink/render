@@ -992,27 +992,26 @@ impl RenderContext {
 
         if let Ok(Ok(())) = receiver.recv() {
             let data = buffer_slice.get_mapped_range();
-            let mut unpadded_pixels = Vec::with_capacity((spec.composition.width * spec.composition.height * 4) as usize);
+            let total_pixels = (spec.composition.width * spec.composition.height * 4) as usize;
+            let mut unpadded_pixels = vec![0u8; total_pixels];
+            let mut dest_idx = 0;
             for row in 0..spec.composition.height {
                 let start = (row * self.bytes_per_row) as usize;
                 let end = start + (spec.composition.width * 4) as usize;
                 let row_data = &data[start..end];
                 
-                // Premultiplied alpha: multiply RGB by normalised alpha
+                // Premultiplied alpha: multiply RGB by normalised alpha using fast integer math
                 for chunk in row_data.chunks_exact(4) {
-                    let r = chunk[0];
-                    let g = chunk[1];
-                    let b = chunk[2];
-                    let a = chunk[3];
+                    let r = chunk[0] as u32;
+                    let g = chunk[1] as u32;
+                    let b = chunk[2] as u32;
+                    let a = chunk[3] as u32;
                     
-                    let alpha_factor = a as f32 / 255.0;
-                    let r_pre = (r as f32 * alpha_factor).round().clamp(0.0, 255.0) as u8;
-                    let g_pre = (g as f32 * alpha_factor).round().clamp(0.0, 255.0) as u8;
-                    let b_pre = (b as f32 * alpha_factor).round().clamp(0.0, 255.0) as u8;
-                    unpadded_pixels.push(r_pre);
-                    unpadded_pixels.push(g_pre);
-                    unpadded_pixels.push(b_pre);
-                    unpadded_pixels.push(a);
+                    unpadded_pixels[dest_idx] = ((r * a + 127) / 255) as u8;
+                    unpadded_pixels[dest_idx + 1] = ((g * a + 127) / 255) as u8;
+                    unpadded_pixels[dest_idx + 2] = ((b * a + 127) / 255) as u8;
+                    unpadded_pixels[dest_idx + 3] = a as u8;
+                    dest_idx += 4;
                 }
             }
             drop(data);
