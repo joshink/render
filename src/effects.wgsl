@@ -1,3 +1,22 @@
+// ================================================================
+// effects.wgsl — Built-in post-processing effects pipeline
+//
+// A compute shader applied per-pixel to the rendered frame. Each
+// invocation processes one pixel through a chain of image effects
+// controlled by the `Params` uniform. The pipeline stages are:
+//
+//   1. Initial color sample
+//   2. Fluid flow (advection with temporal feedback buffer)
+//   3. Contrast & HSL adjustment (grayscale, saturation, hue, brightness)
+//   4. Gaussian blur
+//   5. Glow (thresholded additive bloom)
+//   6. Depth-of-field blur
+//   7. Film grain
+//   8. Film flicker
+//
+// Workgroup size: 16×16 threads (256 pixels per workgroup).
+// ================================================================
+
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
 @group(0) @binding(1) var output_tex: texture_storage_2d<rgba8unorm, write>;
 
@@ -43,14 +62,21 @@ struct Params {
 @group(0) @binding(4) var feedback_in_tex: texture_2d<f32>;
 @group(0) @binding(5) var feedback_out_tex: texture_storage_2d<rgba8unorm, write>;
 
-// Pseudo-random noise generator
+
+// ============================================================
+// UTILITY FUNCTIONS — Noise, flow fields, and color conversion
+// ============================================================
+
+// Fast pseudo-random hash. Input: 2D coordinate. Output: [0, 1) float.
 fn hash(p: vec2<f32>) -> f32 {
     let p3 = fract(vec3<f32>(p.xyx) * vec3<f32>(0.1031, 0.1030, 0.0973));
     let p3_added = p3 + dot(p3, p3.yzx + 33.33);
     return fract((p3_added.x + p3_added.y) * p3_added.z);
 }
 
-// 2D Value Noise
+// 2D value noise with Hermite smoothing. Returns [0, 1).
+// Uses hash() at four integer lattice corners, then bilinearly
+// interpolates with a smooth (3t²−2t³) curve.
 fn noise(p: vec2<f32>) -> f32 {
     let i = floor(p);
     let f = fract(p);
@@ -64,7 +90,9 @@ fn noise(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
-// Fluid flow vector field generator using noise
+// Generates a time-varying 2D displacement vector field for fluid flow.
+// Returns [-1, 1] per component. Two noise samples at different temporal
+// offsets yield independent X and Y displacement.
 fn get_flow_vector(p: vec2<f32>, t: f32) -> vec2<f32> {
     let scale = 12.0;
     let n1 = noise(p * scale + vec2<f32>(t * 0.8, t * 0.5));
@@ -72,7 +100,7 @@ fn get_flow_vector(p: vec2<f32>, t: f32) -> vec2<f32> {
     return vec2<f32>(n1 * 2.0 - 1.0, n2 * 2.0 - 1.0);
 }
 
-// RGB to HSL conversion
+// Converts linear RGB [0,1] to HSL. H is [0,1] (not degrees), S and L are [0,1].
 fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
     let min_val = min(c.r, min(c.g, c.b));
     let max_val = max(c.r, max(c.g, c.b));
@@ -101,6 +129,7 @@ fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(h, s, l);
 }
 
+// Helper for HSL→RGB. Converts a single hue sector to an RGB channel value.
 fn hue_to_rgb(p: f32, q: f32, t_in: f32) -> f32 {
     var t = t_in;
     if (t < 0.0) { t = t + 1.0; }
@@ -111,7 +140,7 @@ fn hue_to_rgb(p: f32, q: f32, t_in: f32) -> f32 {
     return p;
 }
 
-// HSL to RGB conversion
+// Converts HSL back to linear RGB [0,1].
 fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
     if (hsl.y == 0.0) {
         return vec3<f32>(hsl.z); // achromatic
@@ -124,6 +153,11 @@ fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
+
+// ============================================================
+// MAIN COMPUTE ENTRY POINT — Per-pixel effects pipeline
+// ============================================================
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= params.width || id.y >= params.height) {
@@ -131,12 +165,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let coords = vec2<i32>(id.xy);
+    // Normalized pixel coordinates in [0, 1]
     let uv = vec2<f32>(id.xy) / vec2<f32>(f32(params.width), f32(params.height));
-    
-    // 1. Initial color sample
+
+    // ============================================================
+    // 1. INITIAL COLOR SAMPLE — Read source pixel
+    // ============================================================
     var color = textureLoad(input_tex, coords, 0);
 
-    // 2. Fluid Flow (advection using feedback buffer)
+    // ============================================================
+    // 2. FLUID FLOW — Advection using temporal feedback buffer
+    // ============================================================
     if (params.flow_amount > 0.0) {
         let flow_dir = get_flow_vector(uv, params.time * params.flow_speed);
         let displace_offset = flow_dir * params.flow_amount * f32(params.width) * 0.02;
@@ -152,7 +191,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(feedback_out_tex, coords, color);
     }
 
-    // 3. Contrast & HSL Adjust
+    // ============================================================
+    // 3. CONTRAST & HSL ADJUST — Grayscale, saturation, hue, brightness
+    // ============================================================
     // Grayscale
     if (params.grayscale_enabled == 1u) {
         let gray = dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -175,7 +216,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         color = vec4<f32>((color.rgb - 0.5) * params.contrast_factor + 0.5, color.a);
     }
 
-    // 4. Gaussian Blur
+    // ============================================================
+    // 4. GAUSSIAN BLUR — Separable approximation via box kernel
+    // ============================================================
     if (params.blur_radius > 0.0) {
         let r_limit = i32(clamp(params.blur_radius, 0.0, 15.0));
         var sum = vec4<f32>(0.0);
@@ -194,7 +237,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         color = sum / max(weight, 0.0001);
     }
 
-    // 5. Glow (additive high-pass blurred blend)
+    // ============================================================
+    // 5. GLOW — Additive high-pass blurred blend (bloom)
+    // ============================================================
     if (params.glow_intensity > 0.0) {
         let r_limit = i32(clamp(params.glow_radius, 0.0, 15.0));
         var glow_sum = vec3<f32>(0.0);
@@ -219,7 +264,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         color = vec4<f32>(color.rgb + blurred_glow, color.a);
     }
 
-    // 6. Depth Blur
+    // ============================================================
+    // 6. DEPTH BLUR — Distance-based depth-of-field
+    // ============================================================
     if (params.depth_blur_near_blur > 0.0 || params.depth_blur_far_blur > 0.0) {
         var depth = 0.0;
         if (params.depth_blur_use_map == 1u) {
@@ -250,21 +297,27 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // 7. Film Grain
+    // ============================================================
+    // 7. FILM GRAIN — Temporal noise modulated by luminance
+    // ============================================================
     if (params.film_grain_amount > 0.0) {
         let grain_fps = 24.0;
         let t_grain = floor(params.time * params.film_grain_speed * grain_fps) / grain_fps;
         let noise_val = hash(uv * 1234.5 + t_grain * 987.6) * 2.0 - 1.0;
         
         let luma = dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        // Parabolic midtone mask: grain is strongest at mid-luminance, zero at black/white
         let grain_mask = 4.0 * luma * (1.0 - luma);
         
         color = vec4<f32>(color.rgb + noise_val * params.film_grain_amount * grain_mask, color.a);
     }
 
-    // 8. Film Flicker
+    // ============================================================
+    // 8. FILM FLICKER — Organic brightness oscillation
+    // ============================================================
     if (params.film_flicker_amount > 0.0) {
         let t_flicker = params.time * params.film_flicker_speed;
+        // Product of incommensurate frequencies creates organic, non-repeating flicker
         let flicker = sin(t_flicker * 11.3) * cos(t_flicker * 5.7) * sin(t_flicker * 23.1);
         let flicker_factor = 1.0 + flicker * params.film_flicker_amount;
         color = vec4<f32>(color.rgb * flicker_factor, color.a);

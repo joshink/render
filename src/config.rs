@@ -1,8 +1,31 @@
+//! Render spec deserialization and runtime expression / keyframe evaluation.
+//!
+//! This module defines the data structures that map to the JSON render
+//! specification, and provides evaluation functions for dynamic properties
+//! including literal values, `evalexpr` expressions, and keyframe arrays
+//! with linear interpolation.
+
 use serde::Deserialize;
 use std::collections::HashMap;
 use evalexpr::{eval_with_context, ContextWithMutableVariables, HashMapContext};
 
-/// Root specification for a render job.
+// ---------------------------------------------------------------------------
+// Movie-mode oscillation constants
+// ---------------------------------------------------------------------------
+
+/// Amplitude of the sinusoidal brightness oscillation in movie mode.
+const BRIGHTNESS_OSCILLATION_AMPLITUDE: f32 = 0.8;
+
+/// Frequency multiplier (cycles per second, before the 2π factor) for
+/// the brightness oscillation in movie mode.
+const BRIGHTNESS_OSCILLATION_FREQ: f32 = 2.0;
+
+// ---------------------------------------------------------------------------
+// Data model — deserialized from the JSON render spec
+// ---------------------------------------------------------------------------
+
+/// Root specification for a render job, containing composition settings,
+/// assets, tracks, and optional audio tracks.
 #[derive(Deserialize, Debug, Clone)]
 pub struct RenderSpec {
     pub version: String,
@@ -13,6 +36,7 @@ pub struct RenderSpec {
     pub audio_tracks: Option<Vec<AudioTrack>>,
 }
 
+/// Output dimensions, frame rate, and total duration of the composition.
 #[derive(Deserialize, Debug, Clone)]
 pub struct Composition {
     pub width: u32,
@@ -21,6 +45,7 @@ pub struct Composition {
     pub duration: f32,
 }
 
+/// A named asset referenced by clips (video, image, audio, shader, or font).
 #[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum Asset {
@@ -36,6 +61,7 @@ pub enum Asset {
     Font { provider: String, path: String },
 }
 
+/// A visual track containing an ordered sequence of clips and optional transitions.
 #[derive(Deserialize, Debug, Clone)]
 pub struct Track {
     pub id: String,
@@ -46,6 +72,7 @@ pub struct Track {
     pub transitions: Vec<Transition>,
 }
 
+/// An audio track containing an ordered sequence of audio clips.
 #[derive(Deserialize, Debug, Clone)]
 pub struct AudioTrack {
     pub id: String,
@@ -54,6 +81,7 @@ pub struct AudioTrack {
     pub clips: Vec<AudioClip>,
 }
 
+/// A single audio clip referencing an audio or video asset.
 #[derive(Deserialize, Debug, Clone)]
 pub struct AudioClip {
     pub id: String,
@@ -63,6 +91,7 @@ pub struct AudioClip {
     pub offset: f32,
 }
 
+/// Discriminant for the kind of content a clip renders.
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipType {
@@ -72,6 +101,7 @@ pub enum ClipType {
     Effect,
 }
 
+/// Porter-Duff / Photoshop-style blend mode applied when compositing a clip.
 #[derive(Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BlendMode {
@@ -85,6 +115,8 @@ impl BlendMode {
     pub fn as_u32(self) -> u32 { self as u32 }
 }
 
+/// A single visual clip on a track, carrying type-specific params, transform,
+/// effects, and an optional custom shader.
 #[derive(Deserialize, Debug, Clone)]
 pub struct Clip {
     pub id: String,
@@ -112,11 +144,13 @@ pub struct Clip {
     pub params: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Parameters for a solid-color clip (RGBA, each component 0.0–1.0).
 #[derive(Deserialize, Debug, Clone)]
 pub struct SolidParams {
     pub color: [f32; 4],
 }
 
+/// Parameters for a text clip including font selection and styling.
 #[derive(Deserialize, Debug, Clone)]
 pub struct TextParams {
     pub text: String,
@@ -127,6 +161,8 @@ pub struct TextParams {
     pub axes: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// Spatial transform properties (position, scale, rotation, opacity),
+/// each of which may be a literal, expression, or keyframe array.
 #[derive(Deserialize, Debug, Clone)]
 pub struct Transform {
     pub position: Option<serde_json::Value>,
@@ -135,6 +171,7 @@ pub struct Transform {
     pub opacity: Option<serde_json::Value>,
 }
 
+/// A named post-processing effect applied to a clip, with optional parameters.
 #[derive(Deserialize, Debug, Clone)]
 pub struct Effect {
     #[serde(rename = "type")]
@@ -144,6 +181,7 @@ pub struct Effect {
     pub params: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// A transition between two clips, driven by a shader.
 #[derive(Deserialize, Debug, Clone)]
 pub struct Transition {
     pub id: String,
@@ -156,7 +194,11 @@ pub struct Transition {
     pub to: String,
 }
 
-/// GPU layout for custom built-in effect shader uniforms.
+/// GPU-side uniform block for the built-in effect shader pipeline.
+///
+/// **Alignment contract**: this struct is `#[repr(C)]` and its total size
+/// must be a multiple of 16 bytes (std140 / WGSL uniform layout). The
+/// trailing `_padding` field ensures this invariant.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShaderParams {
@@ -165,39 +207,42 @@ pub struct ShaderParams {
     pub brightness_factor: f32,
     pub contrast_factor: f32,
     pub saturation_factor: f32,
-    
+
     pub hue_rotate_angle: f32,
     pub blur_radius: f32,
     pub glow_intensity: f32,
     pub glow_radius: f32,
-    
+
     pub glow_threshold: f32,
     pub film_grain_amount: f32,
     pub film_grain_speed: f32,
     pub film_flicker_amount: f32,
-    
+
     pub film_flicker_speed: f32,
     pub depth_blur_focus_x: f32,
     pub depth_blur_focus_y: f32,
     pub depth_blur_focus_radius: f32,
-    
+
     pub depth_blur_near_blur: f32,
     pub depth_blur_far_blur: f32,
     pub depth_blur_use_map: u32,
     pub flow_amount: f32,
-    
+
     pub flow_speed: f32,
     pub flow_decay: f32,
     pub time: f32,
     pub clip_time: f32,
-    
+
     pub width: u32,
     pub height: u32,
     pub _padding: [u32; 2],
 }
 
 
-/// GPU layout for compositor shader uniforms.
+/// GPU-side uniform block for the compositor shader.
+///
+/// **Alignment contract**: `#[repr(C)]` with `_padding` to maintain a
+/// total size that is a multiple of 16 bytes (std140 / WGSL uniform layout).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CompositorParams {
@@ -213,31 +258,68 @@ pub struct CompositorParams {
     pub solid_color: [f32; 4],
 }
 
+// ---------------------------------------------------------------------------
+// Deduplicated clip start-time computation
+// ---------------------------------------------------------------------------
+
+/// Minimal trait exposing the two properties needed to compute absolute
+/// start times for clips arranged sequentially on a track.
+trait HasDurationAndOffset {
+    fn duration(&self) -> f32;
+    fn offset(&self) -> f32;
+}
+
+impl HasDurationAndOffset for Clip {
+    fn duration(&self) -> f32 { self.duration }
+    fn offset(&self) -> f32 { self.offset }
+}
+
+impl HasDurationAndOffset for AudioClip {
+    fn duration(&self) -> f32 { self.duration }
+    fn offset(&self) -> f32 { self.offset }
+}
+
+/// Computes absolute start times for a sequence of clips, accumulating
+/// each clip's offset and duration from the track's `start` time.
+fn compute_clip_start_times<T: HasDurationAndOffset>(start: f32, clips: &[T]) -> Vec<f32> {
+    let mut start_times = Vec::with_capacity(clips.len());
+    let mut current_time = start;
+    for clip in clips {
+        current_time += clip.offset().max(0.0);
+        start_times.push(current_time);
+        current_time += clip.duration();
+    }
+    start_times
+}
+
 impl Track {
     pub fn get_clip_start_times(&self) -> Vec<f32> {
-        let mut start_times = Vec::with_capacity(self.clips.len());
-        let mut current_time = self.start;
-        for clip in &self.clips {
-            current_time += clip.offset.max(0.0);
-            start_times.push(current_time);
-            current_time += clip.duration;
-        }
-        start_times
+        compute_clip_start_times(self.start, &self.clips)
     }
 }
 
 impl AudioTrack {
     pub fn get_clip_start_times(&self) -> Vec<f32> {
-        let mut start_times = Vec::with_capacity(self.clips.len());
-        let mut current_time = self.start;
-        for clip in &self.clips {
-            current_time += clip.offset.max(0.0);
-            start_times.push(current_time);
-            current_time += clip.duration;
-        }
-        start_times
+        compute_clip_start_times(self.start, &self.clips)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Effect parameter helper
+// ---------------------------------------------------------------------------
+
+/// Reads a named float parameter from an effect's params map, evaluating
+/// expressions and keyframes. Returns `default` if the key is absent.
+fn read_effect_float(effect: &Effect, key: &str, clip_time: f32, w: u32, h: u32, default: f32) -> f32 {
+    effect.params.as_ref()
+        .and_then(|map| map.get(key))
+        .map(|val| evaluate_float(val, clip_time, w, h, default))
+        .unwrap_or(default)
+}
+
+// ---------------------------------------------------------------------------
+// RenderSpec helpers
+// ---------------------------------------------------------------------------
 
 impl RenderSpec {
     pub fn get_input_path(&self) -> Option<String> {
@@ -346,6 +428,10 @@ impl RenderSpec {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Clip evaluation methods
+// ---------------------------------------------------------------------------
+
 impl Clip {
     pub fn eval_position(&self, t: f32, w: u32, h: u32) -> [f32; 2] {
         self.transform.as_ref()
@@ -353,7 +439,7 @@ impl Clip {
             .map(|v| evaluate_vec2(v, t, w, h, [w as f32 * 0.5, h as f32 * 0.5]))
             .unwrap_or([w as f32 * 0.5, h as f32 * 0.5])
     }
-    
+
     pub fn eval_scale(&self, t: f32, w: u32, h: u32) -> [f32; 2] {
         self.transform.as_ref()
             .and_then(|tr| tr.scale.as_ref())
@@ -374,7 +460,7 @@ impl Clip {
             .map(|v| evaluate_float(v, t, w, h, 1.0))
             .unwrap_or(1.0)
     }
-    
+
     pub fn eval_built_in_effects(&self, clip_time: f32, is_movie: bool) -> (u32, f32) {
         let mut grayscale = 0u32;
         let mut brightness = 1.0f32;
@@ -395,7 +481,9 @@ impl Clip {
                         }
                     }
                     if is_movie {
-                        brightness = brightness * (1.0 + 0.8 * (clip_time * 2.0 * std::f32::consts::PI).sin());
+                        brightness = brightness
+                            * (1.0 + BRIGHTNESS_OSCILLATION_AMPLITUDE
+                                * (clip_time * BRIGHTNESS_OSCILLATION_FREQ * std::f32::consts::PI).sin());
                     }
                 }
                 _ => {}
@@ -453,107 +541,54 @@ impl Clip {
         for effect in &self.effects {
             match effect.effect_type.as_str() {
                 "grayscale" => {
-                    let mut enabled = true;
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("enabled") {
-                            enabled = evaluate_float(val, clip_time, comp_width, comp_height, 1.0) > 0.5;
-                        }
-                    }
+                    let mut enabled = read_effect_float(effect, "enabled", clip_time, comp_width, comp_height, 1.0) > 0.5;
                     if is_movie {
                         enabled = enabled && (clip_time * std::f32::consts::PI).sin() > 0.0;
                     }
                     params.grayscale_enabled = if enabled { 1 } else { 0 };
                 }
                 "brightness" => {
-                    let mut factor = 1.0;
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("factor") {
-                            factor = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
-                        }
-                    }
+                    let mut factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
                     if is_movie {
-                        factor = factor * (1.0 + 0.8 * (clip_time * 2.0 * std::f32::consts::PI).sin());
+                        factor = factor
+                            * (1.0 + BRIGHTNESS_OSCILLATION_AMPLITUDE
+                                * (clip_time * BRIGHTNESS_OSCILLATION_FREQ * std::f32::consts::PI).sin());
                     }
                     params.brightness_factor = factor;
                 }
                 "contrast" => {
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("factor") {
-                            params.contrast_factor = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
-                        }
-                    }
+                    params.contrast_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
                 }
                 "saturation" => {
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("factor") {
-                            params.saturation_factor = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
-                        }
-                    }
+                    params.saturation_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
                 }
                 "hue_rotate" => {
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("angle") {
-                            params.hue_rotate_angle = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
-                        }
-                    }
+                    params.hue_rotate_angle = read_effect_float(effect, "angle", clip_time, comp_width, comp_height, 0.0);
                 }
                 "blur" => {
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("radius") {
-                            params.blur_radius = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
-                        }
-                    }
+                    params.blur_radius = read_effect_float(effect, "radius", clip_time, comp_width, comp_height, 0.0);
                 }
                 "glow" => {
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("intensity") {
-                            params.glow_intensity = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
-                        }
-                        if let Some(val) = map.get("radius") {
-                            params.glow_radius = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
-                        }
-                        if let Some(val) = map.get("threshold") {
-                            params.glow_threshold = evaluate_float(val, clip_time, comp_width, comp_height, 0.5);
-                        }
-                    }
+                    params.glow_intensity = read_effect_float(effect, "intensity", clip_time, comp_width, comp_height, 0.0);
+                    params.glow_radius = read_effect_float(effect, "radius", clip_time, comp_width, comp_height, 0.0);
+                    params.glow_threshold = read_effect_float(effect, "threshold", clip_time, comp_width, comp_height, 0.5);
                 }
                 "film_grain" => {
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("amount") {
-                            params.film_grain_amount = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
-                        }
-                        if let Some(val) = map.get("speed") {
-                            params.film_grain_speed = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
-                        }
-                    }
+                    params.film_grain_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
+                    params.film_grain_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
                 }
                 "film_flicker" => {
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("amount") {
-                            params.film_flicker_amount = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
-                        }
-                        if let Some(val) = map.get("speed") {
-                            params.film_flicker_speed = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
-                        }
-                    }
+                    params.film_flicker_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
+                    params.film_flicker_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
                 }
                 "depth_blur" => {
+                    params.depth_blur_focus_x = read_effect_float(effect, "focus_x", clip_time, comp_width, comp_height, 0.5);
+                    params.depth_blur_focus_y = read_effect_float(effect, "focus_y", clip_time, comp_width, comp_height, 0.5);
+                    params.depth_blur_focus_radius = read_effect_float(effect, "focus_radius", clip_time, comp_width, comp_height, 0.2);
+                    params.depth_blur_near_blur = read_effect_float(effect, "near_blur", clip_time, comp_width, comp_height, 0.0);
+                    params.depth_blur_far_blur = read_effect_float(effect, "far_blur", clip_time, comp_width, comp_height, 0.0);
+                    // depth_map is a string asset reference, not a float — handle separately.
                     if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("focus_x") {
-                            params.depth_blur_focus_x = evaluate_float(val, clip_time, comp_width, comp_height, 0.5);
-                        }
-                        if let Some(val) = map.get("focus_y") {
-                            params.depth_blur_focus_y = evaluate_float(val, clip_time, comp_width, comp_height, 0.5);
-                        }
-                        if let Some(val) = map.get("focus_radius") {
-                            params.depth_blur_focus_radius = evaluate_float(val, clip_time, comp_width, comp_height, 0.2);
-                        }
-                        if let Some(val) = map.get("near_blur") {
-                            params.depth_blur_near_blur = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
-                        }
-                        if let Some(val) = map.get("far_blur") {
-                            params.depth_blur_far_blur = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
-                        }
                         if let Some(val) = map.get("depth_map") {
                             if val.as_str().is_some() {
                                 params.depth_blur_use_map = 1;
@@ -562,17 +597,9 @@ impl Clip {
                     }
                 }
                 "flow" => {
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get("amount") {
-                            params.flow_amount = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
-                        }
-                        if let Some(val) = map.get("speed") {
-                            params.flow_speed = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
-                        }
-                        if let Some(val) = map.get("decay") {
-                            params.flow_decay = evaluate_float(val, clip_time, comp_width, comp_height, 0.95);
-                        }
-                    }
+                    params.flow_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
+                    params.flow_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
+                    params.flow_decay = read_effect_float(effect, "decay", clip_time, comp_width, comp_height, 0.95);
                 }
                 _ => {}
             }
@@ -581,13 +608,25 @@ impl Clip {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Expression / keyframe evaluators
+// ---------------------------------------------------------------------------
+
+/// Evaluates a JSON value as a single `f32`. The value may be:
+/// - A **literal number** — returned directly.
+/// - An **expression object** `{ "expression": "..." }` — evaluated via `evalexpr`.
+/// - A **keyframe array** `[{ "time": t, "value": v }, ...]` — linearly interpolated.
+/// - `null` or unrecognised — returns `default`.
 pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, width: u32, height: u32, default: f32) -> f32 {
+    // Null → default
     if value.is_null() {
         return default;
     }
+    // Literal number
     if let Some(num) = value.as_f64() {
         return num as f32;
     }
+    // Expression object: { "expression": "<expr>" }
     if let Some(obj) = value.as_object() {
         if let Some(expr_val) = obj.get("expression") {
             if let Some(expr_str) = expr_val.as_str() {
@@ -595,6 +634,7 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, width: u32, hei
             }
         }
     }
+    // Keyframe array: [{ "time": <f32>, "value": <f32> }, ...]
     if let Some(arr) = value.as_array() {
         if arr.is_empty() {
             return default;
@@ -612,12 +652,15 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, width: u32, hei
                 return default;
             }
             kfs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            // Clamp to first keyframe
             if clip_time <= kfs[0].0 {
                 return kfs[0].1;
             }
+            // Clamp to last keyframe
             if clip_time >= kfs[kfs.len() - 1].0 {
                 return kfs[kfs.len() - 1].1;
             }
+            // Linear interpolation between surrounding keyframes
             for window in kfs.windows(2) {
                 let kf1 = window[0];
                 let kf2 = window[1];
@@ -631,16 +674,25 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, width: u32, hei
     default
 }
 
+/// Evaluates a JSON value as an `[f32; 2]` vector. The value may be:
+/// - A **literal 2-element array** `[x, y]` — returned directly.
+/// - A **scalar number** — broadcast to `[n, n]`.
+/// - A **keyframe array** `[{ "time": t, "value": [x, y] }, ...]` — linearly interpolated.
+/// - An **expression object** with a bracketed pair `"[exprX, exprY]"` — each component evaluated.
+/// - `null` or unrecognised — returns `default`.
 pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, height: u32, default: [f32; 2]) -> [f32; 2] {
+    // Null → default
     if value.is_null() {
         return default;
     }
     if let Some(arr) = value.as_array() {
+        // Literal 2-element array: [x, y]
         if arr.len() == 2 {
             if let (Some(x), Some(y)) = (arr[0].as_f64(), arr[1].as_f64()) {
                 return [x as f32, y as f32];
             }
         }
+        // Keyframe array: [{ "time": t, "value": [x, y] | n }, ...]
         if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
             let mut kfs: Vec<(f32, [f32; 2])> = Vec::new();
             for item in arr {
@@ -653,6 +705,7 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, heig
                             kfs.push((t, [vx, vy]));
                         }
                     } else if let Some(v_num) = v_val.as_f64() {
+                        // Scalar value broadcast to both components
                         kfs.push((t, [v_num as f32, v_num as f32]));
                     }
                 }
@@ -661,12 +714,15 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, heig
                 return default;
             }
             kfs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            // Clamp to first keyframe
             if clip_time <= kfs[0].0 {
                 return kfs[0].1;
             }
+            // Clamp to last keyframe
             if clip_time >= kfs[kfs.len() - 1].0 {
                 return kfs[kfs.len() - 1].1;
             }
+            // Linear interpolation between surrounding keyframes
             for window in kfs.windows(2) {
                 let kf1 = window[0];
                 let kf2 = window[1];
@@ -679,9 +735,11 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, heig
             }
         }
     }
+    // Scalar number broadcast to both components
     if let Some(num) = value.as_f64() {
         return [num as f32, num as f32];
     }
+    // Expression object with bracketed pair: { "expression": "[exprX, exprY]" }
     if let Some(obj) = value.as_object() {
         if let Some(expr_val) = obj.get("expression") {
             if let Some(expr_str) = expr_val.as_str() {
@@ -700,7 +758,12 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, heig
     default
 }
 
+/// Evaluates a single math expression string via `evalexpr`, with `time`,
+/// `clip_time`, `comp_width`, `comp_height`, and `pi` available as variables.
+/// Falls back to a plain `f32::parse` if the expression engine can't handle it.
 pub fn evaluate_simple_expression(expr: &str, clip_time: f32, width: u32, height: u32, default: f32) -> f32 {
+    // evalexpr uses underscores for member access; replace dots so that
+    // decimal literals like "0.5" become "0_5" (handled by the engine).
     let cleaned_expr = expr.replace(".", "_");
     let mut context = HashMapContext::new();
     let _ = context.set_value("time".into(), (clip_time as f64).into());
@@ -709,13 +772,15 @@ pub fn evaluate_simple_expression(expr: &str, clip_time: f32, width: u32, height
     let _ = context.set_value("comp_height".into(), (height as i64).into());
     let _ = context.set_value("pi".into(), (std::f64::consts::PI).into());
 
+    // Try evaluating as a float expression first
     if let Ok(evalexpr::Value::Float(result)) = eval_with_context(&cleaned_expr, &context) {
         return result as f32;
     }
+    // Integer expressions (e.g. "comp_width / 2") yield an Int
     if let Ok(evalexpr::Value::Int(result)) = eval_with_context(&cleaned_expr, &context) {
         return result as f32;
     }
-    
-    // Fallback for simple parse
+
+    // Fallback: try parsing the raw string as a number
     expr.parse::<f32>().unwrap_or(default)
 }

@@ -1,3 +1,20 @@
+// ================================================================
+// compositor.wgsl — Per-pixel compositing shader
+//
+// Blends a foreground clip onto the accumulated background using
+// position, rotation, scale, opacity, and blend modes. Each compute
+// invocation processes one output pixel by:
+//
+//   1. Reading the background color at that pixel
+//   2. Inverse-transforming the pixel coordinate into source clip space
+//   3. Sampling the foreground (media or solid color) if in bounds
+//   4. Applying per-clip adjustments (grayscale, brightness, opacity)
+//   5. Compositing foreground over background using the selected blend
+//      mode and premultiplied Porter-Duff source-over alpha
+//
+// Workgroup size: 16×16 threads (256 pixels per workgroup).
+// ================================================================
+
 @group(0) @binding(0) var bg_tex: texture_2d<f32>;
 @group(0) @binding(1) var media_tex: texture_2d<f32>;
 @group(0) @binding(2) var output_tex: texture_storage_2d<rgba8unorm, write>;
@@ -17,6 +34,14 @@ struct CompositorParams {
 }
 @group(0) @binding(3) var<uniform> params: CompositorParams;
 
+
+// ============================================================
+// BLEND MODE FUNCTIONS (W3C Compositing and Blending Level 1)
+// ============================================================
+
+// W3C soft-light blend (per-channel): darkens or lightens
+// depending on source value. Uses the piece-wise function from
+// the W3C spec with the D(cb) helper for cb <= 0.25.
 fn soft_light_channel(cb: f32, cs: f32) -> f32 {
     if (cs <= 0.5) {
         return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb);
@@ -31,6 +56,7 @@ fn soft_light_channel(cb: f32, cs: f32) -> f32 {
     }
 }
 
+// W3C soft-light blend: darkens or lightens depending on source value.
 fn soft_light(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(
         soft_light_channel(cb.r, cs.r),
@@ -39,6 +65,7 @@ fn soft_light(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
     );
 }
 
+// W3C overlay blend (per-channel): multiplies darks, screens lights.
 fn overlay_channel(cb: f32, cs: f32) -> f32 {
     if (cb <= 0.5) {
         return 2.0 * cb * cs;
@@ -47,6 +74,7 @@ fn overlay_channel(cb: f32, cs: f32) -> f32 {
     }
 }
 
+// W3C overlay blend: multiplies darks, screens lights.
 fn overlay(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(
         overlay_channel(cb.r, cs.r),
@@ -55,6 +83,7 @@ fn overlay(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
     );
 }
 
+// W3C hard-light blend (per-channel): overlay with swapped operands.
 fn hard_light_channel(cb: f32, cs: f32) -> f32 {
     if (cs <= 0.5) {
         return 2.0 * cb * cs;
@@ -63,6 +92,7 @@ fn hard_light_channel(cb: f32, cs: f32) -> f32 {
     }
 }
 
+// W3C hard-light blend: overlay with swapped operands.
 fn hard_light(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(
         hard_light_channel(cb.r, cs.r),
@@ -71,6 +101,14 @@ fn hard_light(cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
     );
 }
 
+
+// ============================================================
+// PORTER-DUFF COMPOSITING WITH BLEND MODES
+// ============================================================
+
+// Applies the selected blend mode between background (color_b) and
+// foreground (color_f), then composites using premultiplied
+// Porter-Duff source-over with the blend result.
 fn blend_colors(color_b: vec4<f32>, color_f: vec4<f32>, mode: u32) -> vec4<f32> {
     let src_raw = color_f.rgb;
     let dst_raw = color_b.rgb;
@@ -113,18 +151,27 @@ fn blend_colors(color_b: vec4<f32>, color_f: vec4<f32>, mode: u32) -> vec4<f32> 
         blend_raw = src_raw;
     }
     
+    // Convert foreground to premultiplied alpha
     let src = vec4<f32>(src_raw * color_f.a, color_f.a);
     let dst = vec4<f32>(dst_raw * color_b.a, color_b.a);
     
+    // Porter-Duff source-over alpha
     let out_a = src.a + dst.a * (1.0 - src.a);
+    // Blend result weighted by both alpha channels (PDF reference equation 7.10)
     let out_rgb = src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a) + src.a * dst.a * blend_raw;
     
     if (out_a > 0.0) {
+        // Un-premultiply for storage as straight alpha
         return vec4<f32>(out_rgb / out_a, out_a);
     } else {
         return vec4<f32>(0.0);
     }
 }
+
+
+// ============================================================
+// MAIN COMPOSITING PASS — Transform, sample, blend per pixel
+// ============================================================
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -142,6 +189,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var p = vec2<f32>(id.xy) - params.position;
 
+    // Convert degrees to radians, negate for screen-space (Y-down)
     let rad = -params.rotation * 3.14159265 / 180.0;
     let cos_r = cos(rad);
     let sin_r = sin(rad);
@@ -150,8 +198,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         p.x * sin_r + p.y * cos_r
     );
 
+    // Apply inverse scale to map output pixel back to source space
     p = p / params.scale;
 
+    // Re-center: transform origin is clip center
     let local_coords = p + vec2<f32>(clip_width, clip_height) * 0.5;
 
     var fg_color = vec4<f32>(0.0);
