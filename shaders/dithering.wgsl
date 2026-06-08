@@ -40,14 +40,14 @@ fn hash2D(p: vec2<f32>) -> f32 {
 fn bayer2(coord: vec2<u32>) -> f32 {
     let x = coord.x % 2u;
     let y = coord.y % 2u;
-    let m = array<f32, 4>(0.0, 2.0, 3.0, 1.0);
+    var m = array<f32, 4>(0.0, 2.0, 3.0, 1.0);
     return m[x + y * 2u] / 4.0;
 }
 
 fn bayer4(coord: vec2<u32>) -> f32 {
     let x = coord.x % 4u;
     let y = coord.y % 4u;
-    let m = array<f32, 16>(
+    var m = array<f32, 16>(
          0.0,  8.0,  2.0, 10.0,
         12.0,  4.0, 14.0,  6.0,
          3.0, 11.0,  1.0,  9.0,

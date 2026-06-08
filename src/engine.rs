@@ -129,6 +129,77 @@ pub fn pack_custom_params(
     buffer
 }
 
+pub fn pack_effect_params(
+    effect: &Effect,
+    clip_time: f32,
+    duration: f32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let registry = crate::config::get_effects_registry();
+    if let Some(meta) = registry.iter().find(|m| m.effect_type == effect.effect_type) {
+        let mut sorted_params = meta.params.clone();
+        sorted_params.sort_by(|a, b| a.target_name().cmp(b.target_name()));
+
+        let mut buffer = Vec::new();
+        for param in sorted_params {
+            if param.param_type == "depth_map" {
+                let mut has_map = 0i32;
+                if let Some(ref map) = effect.params {
+                    if let Some(val) = map.get(&param.name) {
+                        if let Some(s) = val.as_str() {
+                            if !s.is_empty() {
+                                has_map = 1;
+                            }
+                        }
+                    }
+                }
+                buffer.extend_from_slice(bytemuck::bytes_of(&has_map));
+            } else if param.param_type == "bool" {
+                let default_val = param.default;
+                let val_f32 = if let Some(ref map) = effect.params {
+                    if let Some(val) = map.get(&param.name) {
+                        crate::config::evaluate_float(val, clip_time, duration, width, height, default_val)
+                    } else {
+                        default_val
+                    }
+                } else {
+                    default_val
+                };
+                let val_i32 = if val_f32 > 0.5 { 1i32 } else { 0i32 };
+                buffer.extend_from_slice(bytemuck::bytes_of(&val_i32));
+            } else {
+                let default_val = param.default;
+                let val_f32 = if let Some(ref map) = effect.params {
+                    if let Some(val) = map.get(&param.name) {
+                        crate::config::evaluate_float(val, clip_time, duration, width, height, default_val)
+                    } else {
+                        default_val
+                    }
+                } else {
+                    default_val
+                };
+                buffer.extend_from_slice(bytemuck::bytes_of(&val_f32));
+            }
+        }
+
+        let aligned_len = (buffer.len() + 15) & !15;
+        while buffer.len() < aligned_len {
+            buffer.push(0);
+        }
+        if buffer.is_empty() {
+            buffer.resize(16, 0);
+        }
+        buffer
+    } else {
+        if let Some(ref p) = effect.params {
+            pack_custom_params(p, clip_time, duration, width, height)
+        } else {
+            vec![0u8; 16]
+        }
+    }
+}
+
 /// Creates a texture view with the default descriptor.
 ///
 /// A small helper that reduces visual noise at bind group construction sites
@@ -174,12 +245,9 @@ pub struct RenderContext {
     pub compositor_params_buffer: wgpu::Buffer,
     pub engine_params_buffer: wgpu::Buffer,
     pub custom_params_buffer: wgpu::Buffer,
-    pub built_in_params_buffer: wgpu::Buffer,
     pub compositor_pipeline: wgpu::ComputePipeline,
     pub compositor_bind_group_layout: wgpu::BindGroupLayout,
-    pub effects_wgsl_pipeline: wgpu::ComputePipeline,
-    pub effects_wgsl_bind_group_layout: wgpu::BindGroupLayout,
-    /// User-registered custom shader pipelines, keyed by shader asset ID.
+    /// User-registered custom shader pipelines, keyed by shader asset ID or effect type.
     pub custom_shader_pipelines: std::collections::HashMap<String, wgpu::ComputePipeline>,
     pub effect_bind_group_layout: wgpu::BindGroupLayout,
     pub readback_buffer: wgpu::Buffer,
@@ -383,13 +451,8 @@ impl RenderContext {
         std::mem::swap(current_input, current_output);
     }
 
-    /// Dispatches a user-provided custom WGSL shader as a full-screen effect.
-    ///
-    /// Looks up the pre-compiled compute pipeline by `shader_id`, uploads
-    /// `EngineParams` (timing) and any user-defined `params` (via
-    /// `pack_custom_params`), then dispatches. Logs an error and no-ops if
-    /// the pipeline was not registered at startup.
-    fn dispatch_custom_effect<'a>(
+    /// Dispatches an effect (either built-in or custom) using the unified compute layout.
+    fn dispatch_effect<'a>(
         &self,
         effect: &Effect,
         shader_id: &str,
@@ -412,15 +475,25 @@ impl RenderContext {
             };
             self.queue.write_buffer(&self.engine_params_buffer, 0, bytemuck::bytes_of(&engine_params));
 
-            let custom_params_data = if let Some(ref p) = effect.params {
-                pack_custom_params(p, clip_time, duration, spec.composition.width, spec.composition.height)
-            } else {
-                vec![0u8; 16]
-            };
+            let custom_params_data = pack_effect_params(effect, clip_time, duration, spec.composition.width, spec.composition.height);
             self.queue.write_buffer(&self.custom_params_buffer, 0, &custom_params_data);
 
+            let depth_texture_ref = crate::config::get_depth_map_asset_id_from_effects(&[effect.clone()])
+                .and_then(|asset_id| self.gpu_textures.get(&asset_id))
+                .unwrap_or(&self.transparent_texture);
+            let depth_view = create_default_view(depth_texture_ref);
+
+            let frame_idx = (time * spec.composition.fps as f32).round() as u32;
+            let (feedback_in, feedback_out) = if frame_idx % 2 == 0 {
+                (&self.feedback_texture_a, &self.feedback_texture_b)
+            } else {
+                (&self.feedback_texture_b, &self.feedback_texture_a)
+            };
+            let feedback_in_view = create_default_view(feedback_in);
+            let feedback_out_view = create_default_view(feedback_out);
+
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Custom Effect Bind Group"),
+                label: Some(&format!("Effect Bind Group: {}", shader_id)),
                 layout: &self.effect_bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -439,15 +512,27 @@ impl RenderContext {
                         binding: 3,
                         resource: self.custom_params_buffer.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&feedback_in_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&feedback_out_view),
+                    },
                 ],
             });
 
             let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Custom Effect Dispatch"),
+                label: Some(&format!("Effect Dispatch: {}", shader_id)),
             });
             {
                 let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Custom Effect Compute Pass"),
+                    label: Some(&format!("Effect Compute Pass: {}", shader_id)),
                     timestamp_writes: None,
                 });
                 compute_pass.set_pipeline(pipeline);
@@ -457,91 +542,8 @@ impl RenderContext {
             self.queue.submit(Some(encoder.finish()));
             std::mem::swap(current_input, current_output);
         } else {
-            error!("Custom shader pipeline '{}' not found!", shader_id);
+            error!("Shader pipeline '{}' not found!", shader_id);
         }
-    }
-
-    /// Dispatches the built-in `effects.wgsl` shader for standard post-
-    /// processing (blur, glow, colour grading, film grain, depth blur, flow,
-    /// etc.).
-    ///
-    /// Evaluates `ShaderParams` from the clip's effect list, resolves the
-    /// depth-map texture (falling back to transparent), selects the correct
-    /// feedback ping-pong pair based on frame index, and dispatches.
-    fn dispatch_builtin_effects<'a>(
-        &self,
-        effects: &[Effect],
-        time: f32,
-        clip_time: f32,
-        duration: f32,
-        spec: &RenderSpec,
-        current_input: &mut &'a wgpu::Texture,
-        current_output: &mut &'a wgpu::Texture,
-    ) {
-        let built_in_params = crate::config::eval_shader_params_from_effects(
-            effects, clip_time, duration, spec.composition.width, spec.composition.height, time
-        );
-        self.queue.write_buffer(&self.built_in_params_buffer, 0, bytemuck::bytes_of(&built_in_params));
-
-        let depth_texture_ref = crate::config::get_depth_map_asset_id_from_effects(effects)
-            .and_then(|asset_id| self.gpu_textures.get(&asset_id))
-            .unwrap_or(&self.transparent_texture);
-        let depth_view = create_default_view(depth_texture_ref);
-
-        let frame_idx = (time * spec.composition.fps as f32).round() as u32;
-        let (feedback_in, feedback_out) = if frame_idx % 2 == 0 {
-            (&self.feedback_texture_a, &self.feedback_texture_b)
-        } else {
-            (&self.feedback_texture_b, &self.feedback_texture_a)
-        };
-        let feedback_in_view = create_default_view(feedback_in);
-        let feedback_out_view = create_default_view(feedback_out);
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Built-in Effect Bind Group"),
-            layout: &self.effects_wgsl_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&create_default_view(current_input)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&create_default_view(current_output)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.built_in_params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&depth_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&feedback_in_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&feedback_out_view),
-                },
-            ],
-        });
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Built-in Effect Dispatch"),
-        });
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Built-in Effect Compute Pass"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&self.effects_wgsl_pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(self.workgroups_x, self.workgroups_y, 1);
-        }
-        self.queue.submit(Some(encoder.finish()));
-        std::mem::swap(current_input, current_output);
     }
 
     fn dispatch_expanded_effects<'a>(
@@ -554,49 +556,17 @@ impl RenderContext {
         current_input: &mut &'a wgpu::Texture,
         current_output: &mut &'a wgpu::Texture,
     ) {
-        let mut built_in_accumulator = Vec::new();
         let progress = (clip_time / duration).clamp(0.0, 1.0);
 
         for effect in effects {
-            if let Some(ref shader_id) = effect.shader {
-                // If there are accumulated built-in effects, dispatch them first
-                if !built_in_accumulator.is_empty() {
-                    self.dispatch_builtin_effects(
-                        &built_in_accumulator,
-                        time,
-                        clip_time,
-                        duration,
-                        spec,
-                        current_input,
-                        current_output,
-                    );
-                    built_in_accumulator.clear();
-                }
-                // Dispatch the custom effect
-                self.dispatch_custom_effect(
-                    effect,
-                    shader_id,
-                    time,
-                    clip_time,
-                    duration,
-                    progress,
-                    spec,
-                    current_input,
-                    current_output,
-                );
-            } else {
-                // It is a built-in effect, accumulate it
-                built_in_accumulator.push(effect.clone());
-            }
-        }
-
-        // Dispatch any remaining built-in effects
-        if !built_in_accumulator.is_empty() {
-            self.dispatch_builtin_effects(
-                &built_in_accumulator,
+            let shader_id = effect.shader.as_ref().unwrap_or(&effect.effect_type);
+            self.dispatch_effect(
+                effect,
+                shader_id,
                 time,
                 clip_time,
                 duration,
+                progress,
                 spec,
                 current_input,
                 current_output,

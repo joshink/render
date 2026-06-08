@@ -51,12 +51,14 @@ static LOGGER: DualLogger = DualLogger {
 struct CliArgs {
     spec_path: std::path::PathBuf,
     debug_dir: Option<std::path::PathBuf>,
+    include_paths: Vec<std::path::PathBuf>,
 }
 
 fn parse_args() -> CliArgs {
     let args: Vec<String> = env::args().collect();
     let mut spec_path_str = None;
     let mut debug_dir_path_str = None;
+    let mut include_paths = Vec::new();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -78,6 +80,15 @@ fn parse_args() -> CliArgs {
                     std::process::exit(1);
                 }
             }
+            "-I" | "--include" => {
+                if i + 1 < args.len() {
+                    include_paths.push(std::path::PathBuf::from(args[i + 1].clone()));
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for -I/--include option");
+                    std::process::exit(1);
+                }
+            }
             s if s.starts_with('-') => {
                 eprintln!("Error: Unknown option: {}", s);
                 std::process::exit(1);
@@ -90,13 +101,14 @@ fn parse_args() -> CliArgs {
     }
 
     let spec_path_str = spec_path_str.unwrap_or_else(|| {
-        eprintln!("Usage: render-poc [-i <spec.json>] [--debug <dir>]");
+        eprintln!("Usage: render-poc [-i <spec.json>] [--debug <dir>] [-I <path>]");
         std::process::exit(1);
     });
 
     CliArgs {
         spec_path: std::path::PathBuf::from(spec_path_str),
         debug_dir: debug_dir_path_str.map(std::path::PathBuf::from),
+        include_paths,
     }
 }
 
@@ -560,12 +572,6 @@ fn main() {
         mapped_at_creation: false,
     });
 
-    let built_in_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Built-in Effect Params Buffer"),
-        size: std::mem::size_of::<ShaderParams>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     let resources_dur = resources_start.elapsed();
 
     // ── Pipeline compilation ─────────────────────────────────────────────
@@ -637,92 +643,39 @@ fn main() {
         compilation_options: wgpu::PipelineCompilationOptions::default(),
     });
 
-    let effects_wgsl_str = std::fs::read_to_string("src/effects.wgsl").expect("Failed to read effects.wgsl");
-    let effects_wgsl_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Built-in Effects Shader"),
-        source: wgpu::ShaderSource::Wgsl(effects_wgsl_str.into()),
-    });
 
-    let effects_wgsl_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Built-in Effect Bind Group Layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 5,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            },
-        ],
-    });
 
-    let effects_wgsl_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Built-in Effect Pipeline Layout"),
-        bind_group_layouts: &[&effects_wgsl_bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    let effects_wgsl_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Built-in Effect Pipeline"),
-        layout: Some(&effects_wgsl_pipeline_layout),
-        module: &effects_wgsl_shader,
-        entry_point: "main",
-        cache: None,
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-    });
+    // Scan default directory "shaders/" and --include paths
+    let mut wgsl_files = Vec::new();
+    
+    // Scan default directory "shaders/"
+    let default_dir = std::path::Path::new("shaders");
+    if default_dir.exists() && default_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(default_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "wgsl") {
+                    wgsl_files.push(path);
+                }
+            }
+        }
+    }
+    
+    // Scan custom include paths from command line
+    for path in &args.include_paths {
+        if path.is_file() {
+            wgsl_files.push(path.clone());
+        } else if path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() && p.extension().map_or(false, |ext| ext == "wgsl") {
+                        wgsl_files.push(p);
+                    }
+                }
+            }
+        }
+    }
 
     let effect_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Effect Bind Group Layout"),
@@ -767,6 +720,36 @@ fn main() {
                 },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
         ],
     });
 
@@ -776,25 +759,117 @@ fn main() {
         push_constant_ranges: &[],
     });
 
-    // -- Custom shader pipelines --
+    // Scan default directory "shaders/" and --include paths
+    let mut wgsl_files = Vec::new();
+    
+    // Scan default directory "shaders/"
+    let default_dir = std::path::Path::new("shaders");
+    if default_dir.exists() && default_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(default_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "wgsl") {
+                    wgsl_files.push(path);
+                }
+            }
+        }
+    }
+    
+    // Scan custom include paths from command line
+    for path in &args.include_paths {
+        if path.is_file() {
+            wgsl_files.push(path.clone());
+        } else if path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() && p.extension().map_or(false, |ext| ext == "wgsl") {
+                        wgsl_files.push(p);
+                    }
+                }
+            }
+        }
+    }
+
     let mut custom_shader_pipelines = HashMap::new();
-    for (asset_id, asset) in &spec.assets {
-        if let Asset::Shader { path } = asset {
-            let shader_str = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Failed to read shader {}", path));
+
+    for file_path in wgsl_files {
+        let file_stem = file_path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+            
+        let shader_str = match std::fs::read_to_string(&file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to read shader file {:?}: {}", file_path, e);
+                continue;
+            }
+        };
+        
+        if let Some(metadata_str) = extract_metadata(&shader_str) {
+            match serde_json::from_str::<EffectMetadata>(&metadata_str) {
+                Ok(meta) => {
+                    info!("Loaded effect metadata: {} from {:?}", meta.effect_type, file_path);
+                    let effect_type = meta.effect_type.clone();
+                    register_effect_metadata(meta);
+                    
+                    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(&effect_type),
+                        source: wgpu::ShaderSource::Wgsl(shader_str.into()),
+                    });
+                    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some(&effect_type),
+                        layout: Some(&effect_pipeline_layout),
+                        module: &shader_module,
+                        entry_point: "main",
+                        cache: None,
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    });
+                    custom_shader_pipelines.insert(effect_type.clone(), pipeline);
+                }
+                Err(e) => {
+                    log::error!("Failed to parse metadata in {:?}: {}", file_path, e);
+                }
+            }
+        } else {
+            info!("Compiling shader without metadata: {} from {:?}", file_stem, file_path);
             let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(asset_id),
+                label: Some(&file_stem),
                 source: wgpu::ShaderSource::Wgsl(shader_str.into()),
             });
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(asset_id),
+                label: Some(&file_stem),
                 layout: Some(&effect_pipeline_layout),
                 module: &shader_module,
                 entry_point: "main",
                 cache: None,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             });
-            custom_shader_pipelines.insert(asset_id.clone(), pipeline);
-            info!("Compiled custom shader pipeline: {}", asset_id);
+            custom_shader_pipelines.insert(file_stem.clone(), pipeline);
+        }
+    }
+
+    // Compile spec-declared shaders
+    for (asset_id, asset) in &spec.assets {
+        if let Asset::Shader { path } = asset {
+            if !custom_shader_pipelines.contains_key(asset_id) {
+                let shader_str = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Failed to read shader {}", path));
+                let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(asset_id),
+                    source: wgpu::ShaderSource::Wgsl(shader_str.into()),
+                });
+                let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(asset_id),
+                    layout: Some(&effect_pipeline_layout),
+                    module: &shader_module,
+                    entry_point: "main",
+                    cache: None,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                });
+                custom_shader_pipelines.insert(asset_id.clone(), pipeline);
+                info!("Compiled spec-declared shader pipeline: {}", asset_id);
+            }
         }
     }
     let pipeline_dur = pipeline_start.elapsed();
@@ -817,11 +892,8 @@ fn main() {
         compositor_params_buffer,
         engine_params_buffer,
         custom_params_buffer,
-        built_in_params_buffer,
         compositor_pipeline,
         compositor_bind_group_layout,
-        effects_wgsl_pipeline,
-        effects_wgsl_bind_group_layout,
         custom_shader_pipelines,
         effect_bind_group_layout,
         readback_buffer,
