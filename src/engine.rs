@@ -29,27 +29,93 @@ pub struct EngineParams {
 /// **Limitations:**
 /// - Parameters are sorted **alphabetically by key name**, so the shader
 ///   author must declare their uniform fields in the same order.
-/// - Type detection is best-effort: JSON `f64` → `f32`, `bool` → `u32`
+/// - Type detection is best-effort: JSON `f64` → `f32`, `bool` → `u32
 ///   (0 or 1), `i64` → `i32`. Other JSON types (strings, arrays, objects)
 ///   are silently skipped.
 /// - The returned buffer is zero-padded to **16-byte alignment** to satisfy
 ///   WGSL uniform block requirements.
 /// - If the map is empty (or all values are skipped), a 16-byte zeroed
 ///   buffer is returned so the GPU never receives a zero-length binding.
-pub fn pack_custom_params(params: &std::collections::HashMap<String, serde_json::Value>) -> Vec<u8> {
+pub fn pack_custom_params(
+    params: &std::collections::HashMap<String, serde_json::Value>,
+    clip_time: f32,
+    duration: f32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
     let mut keys: Vec<&String> = params.keys().collect();
     keys.sort(); // Naga reflection should ideally be used here per spec
     
     let mut buffer = Vec::new();
     for key in keys {
         let val = &params[key];
-        if let Some(f) = val.as_f64() {
-            buffer.extend_from_slice(bytemuck::bytes_of(&(f as f32)));
-        } else if let Some(b) = val.as_bool() {
-            let val_u32 = if b { 1u32 } else { 0u32 };
+        
+        // 1. Detect vec2
+        let is_vec2 = if let Some(arr) = val.as_array() {
+            if arr.len() == 2 && arr[0].as_f64().is_some() && arr[1].as_f64().is_some() {
+                true
+            } else if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
+                // Keyframe array. Check if value is an array of length 2
+                arr[0].get("value").and_then(|v| v.as_array()).map(|v_arr| v_arr.len() == 2).unwrap_or(false)
+            } else {
+                false
+            }
+        } else if let Some(obj) = val.as_object() {
+            if let Some(expr_val) = obj.get("expression") {
+                if let Some(expr_str) = expr_val.as_str() {
+                    expr_str.starts_with('[') && expr_str.ends_with(']')
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // 2. Detect bool
+        let is_bool = if val.is_boolean() {
+            true
+        } else if let Some(arr) = val.as_array() {
+            if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
+                arr[0].get("value").map(|v| v.is_boolean()).unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // 3. Detect integer
+        let is_int = if val.is_i64() {
+            true
+        } else if let Some(arr) = val.as_array() {
+            if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
+                arr[0].get("value").map(|v| v.is_i64()).unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // 4. Evaluate and pack based on type
+        if is_vec2 {
+            let v = crate::config::evaluate_vec2(val, clip_time, duration, width, height, [0.0, 0.0]);
+            buffer.extend_from_slice(bytemuck::bytes_of(&v[0]));
+            buffer.extend_from_slice(bytemuck::bytes_of(&v[1]));
+        } else if is_bool {
+            let f = crate::config::evaluate_float(val, clip_time, duration, width, height, 0.0);
+            let val_u32 = if f > 0.5 { 1u32 } else { 0u32 };
             buffer.extend_from_slice(bytemuck::bytes_of(&val_u32));
-        } else if let Some(i) = val.as_i64() {
-            buffer.extend_from_slice(bytemuck::bytes_of(&(i as i32)));
+        } else if is_int {
+            let f = crate::config::evaluate_float(val, clip_time, duration, width, height, 0.0);
+            let val_i32 = f.round() as i32;
+            buffer.extend_from_slice(bytemuck::bytes_of(&val_i32));
+        } else {
+            let f = crate::config::evaluate_float(val, clip_time, duration, width, height, 0.0);
+            buffer.extend_from_slice(bytemuck::bytes_of(&f));
         }
     }
     
@@ -171,9 +237,9 @@ impl RenderContext {
                                 preset: clip.preset.clone(),
                                 params: clip.params.clone(),
                             };
-                            spec.expand_effects(&[temp_effect], clip_time, spec.composition.width, spec.composition.height, 0)
+                            spec.expand_effects(&[temp_effect], clip_time, clip.duration, spec.composition.width, spec.composition.height, 0)
                         } else {
-                            spec.expand_effects(&clip.effects, clip_time, spec.composition.width, spec.composition.height, 0)
+                            spec.expand_effects(&clip.effects, clip_time, clip.duration, spec.composition.width, spec.composition.height, 0)
                         };
 
                         self.dispatch_expanded_effects(
@@ -248,8 +314,8 @@ impl RenderContext {
         let rotation = clip.eval_rotation(clip_time, spec.composition.width, spec.composition.height);
         let opacity = clip.eval_opacity(clip_time, spec.composition.width, spec.composition.height);
         let blend_mode_u32 = clip.blend_mode.as_ref().map(|b| b.clone().as_u32()).unwrap_or(0);
-        let expanded_effects = spec.expand_effects(&clip.effects, clip_time, spec.composition.width, spec.composition.height, 0);
-        let (grayscale, brightness) = crate::config::eval_built_in_effects_from_effects(&expanded_effects, clip_time, spec.composition.width, spec.composition.height);
+        let expanded_effects = spec.expand_effects(&clip.effects, clip_time, clip.duration, spec.composition.width, spec.composition.height, 0);
+        let (grayscale, brightness) = crate::config::eval_built_in_effects_from_effects(&expanded_effects, clip_time, clip.duration, spec.composition.width, spec.composition.height);
 
         let (clip_type_u32, solid_color) = match clip.clip_type {
             ClipType::Solid => {
@@ -329,6 +395,7 @@ impl RenderContext {
         shader_id: &str,
         time: f32,
         clip_time: f32,
+        duration: f32,
         progress: f32,
         spec: &RenderSpec,
         current_input: &mut &'a wgpu::Texture,
@@ -346,7 +413,7 @@ impl RenderContext {
             self.queue.write_buffer(&self.engine_params_buffer, 0, bytemuck::bytes_of(&engine_params));
 
             let custom_params_data = if let Some(ref p) = effect.params {
-                pack_custom_params(p)
+                pack_custom_params(p, clip_time, duration, spec.composition.width, spec.composition.height)
             } else {
                 vec![0u8; 16]
             };
@@ -406,12 +473,13 @@ impl RenderContext {
         effects: &[Effect],
         time: f32,
         clip_time: f32,
+        duration: f32,
         spec: &RenderSpec,
         current_input: &mut &'a wgpu::Texture,
         current_output: &mut &'a wgpu::Texture,
     ) {
         let built_in_params = crate::config::eval_shader_params_from_effects(
-            effects, clip_time, spec.composition.width, spec.composition.height, time
+            effects, clip_time, duration, spec.composition.width, spec.composition.height, time
         );
         self.queue.write_buffer(&self.built_in_params_buffer, 0, bytemuck::bytes_of(&built_in_params));
 
@@ -497,6 +565,7 @@ impl RenderContext {
                         &built_in_accumulator,
                         time,
                         clip_time,
+                        duration,
                         spec,
                         current_input,
                         current_output,
@@ -509,6 +578,7 @@ impl RenderContext {
                     shader_id,
                     time,
                     clip_time,
+                    duration,
                     progress,
                     spec,
                     current_input,
@@ -526,6 +596,7 @@ impl RenderContext {
                 &built_in_accumulator,
                 time,
                 clip_time,
+                duration,
                 spec,
                 current_input,
                 current_output,

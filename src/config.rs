@@ -321,10 +321,10 @@ impl AudioTrack {
 
 /// Reads a named float parameter from an effect's params map, evaluating
 /// expressions and keyframes. Returns `default` if the key is absent.
-fn read_effect_float(effect: &Effect, key: &str, clip_time: f32, w: u32, h: u32, default: f32) -> f32 {
+fn read_effect_float(effect: &Effect, key: &str, clip_time: f32, duration: f32, w: u32, h: u32, default: f32) -> f32 {
     effect.params.as_ref()
         .and_then(|map| map.get(key))
-        .map(|val| evaluate_float(val, clip_time, w, h, default))
+        .map(|val| evaluate_float(val, clip_time, duration, w, h, default))
         .unwrap_or(default)
 }
 
@@ -338,6 +338,7 @@ impl RenderSpec {
         &self,
         effects: &[Effect],
         clip_time: f32,
+        duration: f32,
         w: u32,
         h: u32,
         depth: usize,
@@ -361,11 +362,11 @@ impl RenderSpec {
                         
                         let resolved_val = match input.input_type.as_str() {
                             "float" => {
-                                let f = evaluate_float(val, clip_time, w, h, 0.0);
+                                let f = evaluate_float(val, clip_time, duration, w, h, 0.0);
                                 serde_json::Value::from(f)
                             }
                             "vec2" => {
-                                let v = evaluate_vec2(val, clip_time, w, h, [0.0, 0.0]);
+                                let v = evaluate_vec2(val, clip_time, duration, w, h, [0.0, 0.0]);
                                 serde_json::Value::from(v.to_vec())
                             }
                             _ => {
@@ -385,7 +386,7 @@ impl RenderSpec {
                         if let Some(ref params) = filter.params {
                             let mut resolved_params = HashMap::new();
                             for (key, val) in params {
-                                let new_val = self.substitute_value(val, &resolved_inputs, clip_time, w, h);
+                                let new_val = self.substitute_value(val, &resolved_inputs, clip_time, duration, w, h);
                                 resolved_params.insert(key.clone(), new_val);
                             }
                             resolved_filter.params = Some(resolved_params);
@@ -393,7 +394,7 @@ impl RenderSpec {
                         sub_filters.push(resolved_filter);
                     }
 
-                    let expanded_sub = self.expand_effects(&sub_filters, clip_time, w, h, depth + 1);
+                    let expanded_sub = self.expand_effects(&sub_filters, clip_time, duration, w, h, depth + 1);
                     expanded.extend(expanded_sub);
                 } else {
                     log::error!("Preset '{}' not found in RenderSpec presets!", preset_name);
@@ -410,6 +411,7 @@ impl RenderSpec {
         val: &serde_json::Value,
         resolved_inputs: &HashMap<String, serde_json::Value>,
         clip_time: f32,
+        duration: f32,
         w: u32,
         h: u32,
     ) -> serde_json::Value {
@@ -426,11 +428,7 @@ impl RenderSpec {
                     let pattern = format!("${}", name);
                     if replaced_str.contains(&pattern) {
                         let replacement = match resolved {
-                            serde_json::Value::Number(num) => num.to_string(),
-                            serde_json::Value::Bool(b) => b.to_string(),
-                            serde_json::Value::Array(arr) => {
-                                format!("{:?}", arr)
-                            }
+                            serde_json::Value::String(inner_s) => inner_s.clone(),
                             _ => resolved.to_string(),
                         };
                         replaced_str = replaced_str.replace(&pattern, &replacement);
@@ -441,14 +439,14 @@ impl RenderSpec {
             serde_json::Value::Object(obj) => {
                 let mut new_obj = serde_json::Map::new();
                 for (k, v) in obj {
-                    new_obj.insert(k.clone(), self.substitute_value(v, resolved_inputs, clip_time, w, h));
+                    new_obj.insert(k.clone(), self.substitute_value(v, resolved_inputs, clip_time, duration, w, h));
                 }
                 serde_json::Value::Object(new_obj)
             }
             serde_json::Value::Array(arr) => {
                 let mut new_arr = Vec::new();
                 for item in arr {
-                    new_arr.push(self.substitute_value(item, resolved_inputs, clip_time, w, h));
+                    new_arr.push(self.substitute_value(item, resolved_inputs, clip_time, duration, w, h));
                 }
                 serde_json::Value::Array(new_arr)
             }
@@ -522,7 +520,7 @@ impl RenderSpec {
                                 let mut t = 0.5;
                                 while t < clip.duration {
                                     let abs_time = clip_start + t;
-                                    let enabled = read_effect_float(effect, "enabled", t, self.composition.width, self.composition.height, 1.0) > 0.5;
+                                    let enabled = read_effect_float(effect, "enabled", t, clip.duration, self.composition.width, self.composition.height, 1.0) > 0.5;
                                     events.push((
                                         abs_time,
                                         format!(
@@ -572,33 +570,33 @@ impl Clip {
     pub fn eval_position(&self, t: f32, w: u32, h: u32) -> [f32; 2] {
         self.transform.as_ref()
             .and_then(|tr| tr.position.as_ref())
-            .map(|v| evaluate_vec2(v, t, w, h, [w as f32 * 0.5, h as f32 * 0.5]))
+            .map(|v| evaluate_vec2(v, t, self.duration, w, h, [w as f32 * 0.5, h as f32 * 0.5]))
             .unwrap_or([w as f32 * 0.5, h as f32 * 0.5])
     }
 
     pub fn eval_scale(&self, t: f32, w: u32, h: u32) -> [f32; 2] {
         self.transform.as_ref()
             .and_then(|tr| tr.scale.as_ref())
-            .map(|v| evaluate_vec2(v, t, w, h, [1.0, 1.0]))
+            .map(|v| evaluate_vec2(v, t, self.duration, w, h, [1.0, 1.0]))
             .unwrap_or([1.0, 1.0])
     }
 
     pub fn eval_rotation(&self, t: f32, w: u32, h: u32) -> f32 {
         self.transform.as_ref()
             .and_then(|tr| tr.rotation.as_ref())
-            .map(|v| evaluate_float(v, t, w, h, 0.0))
+            .map(|v| evaluate_float(v, t, self.duration, w, h, 0.0))
             .unwrap_or(0.0)
     }
 
     pub fn eval_opacity(&self, t: f32, w: u32, h: u32) -> f32 {
         self.transform.as_ref()
             .and_then(|tr| tr.opacity.as_ref())
-            .map(|v| evaluate_float(v, t, w, h, 1.0))
+            .map(|v| evaluate_float(v, t, self.duration, w, h, 1.0))
             .unwrap_or(1.0)
     }
 
     pub fn eval_built_in_effects(&self, clip_time: f32, w: u32, h: u32) -> (u32, f32) {
-        eval_built_in_effects_from_effects(&self.effects, clip_time, w, h)
+        eval_built_in_effects_from_effects(&self.effects, clip_time, self.duration, w, h)
     }
 
     pub fn get_depth_map_asset_id(&self) -> Option<String> {
@@ -606,21 +604,21 @@ impl Clip {
     }
 
     pub fn eval_shader_params(&self, clip_time: f32, comp_width: u32, comp_height: u32, time: f32) -> ShaderParams {
-        eval_shader_params_from_effects(&self.effects, clip_time, comp_width, comp_height, time)
+        eval_shader_params_from_effects(&self.effects, clip_time, self.duration, comp_width, comp_height, time)
     }
 }
 
-pub fn eval_built_in_effects_from_effects(effects: &[Effect], clip_time: f32, w: u32, h: u32) -> (u32, f32) {
+pub fn eval_built_in_effects_from_effects(effects: &[Effect], clip_time: f32, duration: f32, w: u32, h: u32) -> (u32, f32) {
     let mut grayscale = 0u32;
     let mut brightness = 1.0f32;
     for effect in effects {
         match effect.effect_type.as_str() {
             "grayscale" => {
-                let enabled = read_effect_float(effect, "enabled", clip_time, w, h, 1.0) > 0.5;
+                let enabled = read_effect_float(effect, "enabled", clip_time, duration, w, h, 1.0) > 0.5;
                 grayscale = if enabled { 1 } else { 0 };
             }
             "brightness" => {
-                brightness = read_effect_float(effect, "factor", clip_time, w, h, 1.0);
+                brightness = read_effect_float(effect, "factor", clip_time, duration, w, h, 1.0);
             }
             _ => {}
         }
@@ -646,6 +644,7 @@ pub fn get_depth_map_asset_id_from_effects(effects: &[Effect]) -> Option<String>
 pub fn eval_shader_params_from_effects(
     effects: &[Effect],
     clip_time: f32,
+    duration: f32,
     comp_width: u32,
     comp_height: u32,
     time: f32,
@@ -683,43 +682,43 @@ pub fn eval_shader_params_from_effects(
     for effect in effects {
         match effect.effect_type.as_str() {
             "grayscale" => {
-                let enabled = read_effect_float(effect, "enabled", clip_time, comp_width, comp_height, 1.0) > 0.5;
+                let enabled = read_effect_float(effect, "enabled", clip_time, duration, comp_width, comp_height, 1.0) > 0.5;
                 params.grayscale_enabled = if enabled { 1 } else { 0 };
             }
             "brightness" => {
-                params.brightness_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
+                params.brightness_factor = read_effect_float(effect, "factor", clip_time, duration, comp_width, comp_height, 1.0);
             }
             "contrast" => {
-                params.contrast_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
+                params.contrast_factor = read_effect_float(effect, "factor", clip_time, duration, comp_width, comp_height, 1.0);
             }
             "saturation" => {
-                params.saturation_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
+                params.saturation_factor = read_effect_float(effect, "factor", clip_time, duration, comp_width, comp_height, 1.0);
             }
             "hue_rotate" => {
-                params.hue_rotate_angle = read_effect_float(effect, "angle", clip_time, comp_width, comp_height, 0.0);
+                params.hue_rotate_angle = read_effect_float(effect, "angle", clip_time, duration, comp_width, comp_height, 0.0);
             }
             "blur" => {
-                params.blur_radius = read_effect_float(effect, "radius", clip_time, comp_width, comp_height, 0.0);
+                params.blur_radius = read_effect_float(effect, "radius", clip_time, duration, comp_width, comp_height, 0.0);
             }
             "glow" => {
-                params.glow_intensity = read_effect_float(effect, "intensity", clip_time, comp_width, comp_height, 0.0);
-                params.glow_radius = read_effect_float(effect, "radius", clip_time, comp_width, comp_height, 0.0);
-                params.glow_threshold = read_effect_float(effect, "threshold", clip_time, comp_width, comp_height, 0.5);
+                params.glow_intensity = read_effect_float(effect, "intensity", clip_time, duration, comp_width, comp_height, 0.0);
+                params.glow_radius = read_effect_float(effect, "radius", clip_time, duration, comp_width, comp_height, 0.0);
+                params.glow_threshold = read_effect_float(effect, "threshold", clip_time, duration, comp_width, comp_height, 0.5);
             }
             "film_grain" => {
-                params.film_grain_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
-                params.film_grain_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
+                params.film_grain_amount = read_effect_float(effect, "amount", clip_time, duration, comp_width, comp_height, 0.0);
+                params.film_grain_speed = read_effect_float(effect, "speed", clip_time, duration, comp_width, comp_height, 1.0);
             }
             "film_flicker" => {
-                params.film_flicker_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
-                params.film_flicker_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
+                params.film_flicker_amount = read_effect_float(effect, "amount", clip_time, duration, comp_width, comp_height, 0.0);
+                params.film_flicker_speed = read_effect_float(effect, "speed", clip_time, duration, comp_width, comp_height, 1.0);
             }
             "depth_blur" => {
-                params.depth_blur_focus_x = read_effect_float(effect, "focus_x", clip_time, comp_width, comp_height, 0.5);
-                params.depth_blur_focus_y = read_effect_float(effect, "focus_y", clip_time, comp_width, comp_height, 0.5);
-                params.depth_blur_focus_radius = read_effect_float(effect, "focus_radius", clip_time, comp_width, comp_height, 0.2);
-                params.depth_blur_near_blur = read_effect_float(effect, "near_blur", clip_time, comp_width, comp_height, 0.0);
-                params.depth_blur_far_blur = read_effect_float(effect, "far_blur", clip_time, comp_width, comp_height, 0.0);
+                params.depth_blur_focus_x = read_effect_float(effect, "focus_x", clip_time, duration, comp_width, comp_height, 0.5);
+                params.depth_blur_focus_y = read_effect_float(effect, "focus_y", clip_time, duration, comp_width, comp_height, 0.5);
+                params.depth_blur_focus_radius = read_effect_float(effect, "focus_radius", clip_time, duration, comp_width, comp_height, 0.2);
+                params.depth_blur_near_blur = read_effect_float(effect, "near_blur", clip_time, duration, comp_width, comp_height, 0.0);
+                params.depth_blur_far_blur = read_effect_float(effect, "far_blur", clip_time, duration, comp_width, comp_height, 0.0);
                 if let Some(ref map) = effect.params {
                     if let Some(val) = map.get("depth_map") {
                         if val.as_str().is_some() {
@@ -729,9 +728,9 @@ pub fn eval_shader_params_from_effects(
                 }
             }
             "flow" => {
-                params.flow_amount = read_effect_float(effect, "amount", clip_time, comp_width, comp_height, 0.0);
-                params.flow_speed = read_effect_float(effect, "speed", clip_time, comp_width, comp_height, 1.0);
-                params.flow_decay = read_effect_float(effect, "decay", clip_time, comp_width, comp_height, 0.95);
+                params.flow_amount = read_effect_float(effect, "amount", clip_time, duration, comp_width, comp_height, 0.0);
+                params.flow_speed = read_effect_float(effect, "speed", clip_time, duration, comp_width, comp_height, 1.0);
+                params.flow_decay = read_effect_float(effect, "decay", clip_time, duration, comp_width, comp_height, 0.95);
             }
             _ => {}
         }
@@ -748,7 +747,7 @@ pub fn eval_shader_params_from_effects(
 /// - An **expression object** `{ "expression": "..." }` — evaluated via `evalexpr`.
 /// - A **keyframe array** `[{ "time": t, "value": v }, ...]` — linearly interpolated.
 /// - `null` or unrecognised — returns `default`.
-pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, width: u32, height: u32, default: f32) -> f32 {
+pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, duration: f32, width: u32, height: u32, default: f32) -> f32 {
     // Null → default
     if value.is_null() {
         return default;
@@ -761,7 +760,7 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, width: u32, hei
     if let Some(obj) = value.as_object() {
         if let Some(expr_val) = obj.get("expression") {
             if let Some(expr_str) = expr_val.as_str() {
-                return evaluate_simple_expression(expr_str, clip_time, width, height, default);
+                return evaluate_simple_expression(expr_str, clip_time, duration, width, height, default);
             }
         }
     }
@@ -811,7 +810,7 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, width: u32, hei
 /// - A **keyframe array** `[{ "time": t, "value": [x, y] }, ...]` — linearly interpolated.
 /// - An **expression object** with a bracketed pair `"[exprX, exprY]"` — each component evaluated.
 /// - `null` or unrecognised — returns `default`.
-pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, height: u32, default: [f32; 2]) -> [f32; 2] {
+pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, duration: f32, width: u32, height: u32, default: [f32; 2]) -> [f32; 2] {
     // Null → default
     if value.is_null() {
         return default;
@@ -878,8 +877,8 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, heig
                     let inner = &expr_str[1..expr_str.len() - 1];
                     let parts: Vec<&str> = inner.split(',').collect();
                     if parts.len() == 2 {
-                        let x = evaluate_simple_expression(parts[0].trim(), clip_time, width, height, default[0]);
-                        let y = evaluate_simple_expression(parts[1].trim(), clip_time, width, height, default[1]);
+                        let x = evaluate_simple_expression(parts[0].trim(), clip_time, duration, width, height, default[0]);
+                        let y = evaluate_simple_expression(parts[1].trim(), clip_time, duration, width, height, default[1]);
                         return [x, y];
                     }
                 }
@@ -890,9 +889,9 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, heig
 }
 
 /// Evaluates a single math expression string via `evalexpr`, with `time`,
-/// `clip_time`, `comp_width`, `comp_height`, and `pi` available as variables.
+/// `clip_time`, `clip_duration`, `comp_width`, `comp_height`, and `pi` available as variables.
 /// Falls back to a plain `f32::parse` if the expression engine can't handle it.
-pub fn evaluate_simple_expression(expr: &str, clip_time: f32, width: u32, height: u32, default: f32) -> f32 {
+pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, width: u32, height: u32, default: f32) -> f32 {
     // Replace dots only in recognized variable names to avoid mangling decimal literals.
     let cleaned_expr = expr
         .replace("comp.width", "comp_width")
@@ -902,9 +901,13 @@ pub fn evaluate_simple_expression(expr: &str, clip_time: f32, width: u32, height
     let mut context = HashMapContext::new();
     let _ = context.set_value("time".into(), (clip_time as f64).into());
     let _ = context.set_value("clip_time".into(), (clip_time as f64).into());
+    let _ = context.set_value("clip_duration".into(), (duration as f64).into());
     let _ = context.set_value("comp_width".into(), (width as i64).into());
     let _ = context.set_value("comp_height".into(), (height as i64).into());
     let _ = context.set_value("pi".into(), (std::f64::consts::PI).into());
+    let _ = context.set_function("pi".into(), evalexpr::Function::new(|_argument| {
+        Ok(evalexpr::Value::Float(std::f64::consts::PI))
+    }));
 
     fn get_float(val: &evalexpr::Value) -> Result<f64, evalexpr::EvalexprError> {
         if let Ok(f) = val.as_float() {
