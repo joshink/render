@@ -1,0 +1,224 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/02_all_filters.mp4",
+  "composition": {
+    "width": 1024,
+    "height": 1024,
+    "fps": 30,
+    "duration": 22.0
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    }
+  },
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "input_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 22.0
+        }
+      ]
+    },
+    {
+      "id": "effect_track",
+      "clips": [
+        {
+          "id": "fx_grayscale",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "grayscale",
+              "params": {
+                "enabled": 1.0
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_dim",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "brightness",
+              "params": {
+                "factor": 0.5
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_bright",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "brightness",
+              "params": {
+                "factor": 1.8
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_gray_bright",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "grayscale",
+              "params": {
+                "enabled": 1.0
+              }
+            },
+            {
+              "type": "brightness",
+              "params": {
+                "factor": 0.5
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_hsl",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "contrast",
+              "params": {
+                "factor": 1.4
+              }
+            },
+            {
+              "type": "saturation",
+              "params": {
+                "factor": 1.6
+              }
+            },
+            {
+              "type": "hue_rotate",
+              "params": {
+                "angle": 90.0
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_blur_glow",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "blur",
+              "params": {
+                "radius": 8.0
+              }
+            },
+            {
+              "type": "glow",
+              "params": {
+                "intensity": 1.0,
+                "radius": 5.0,
+                "threshold": 0.4
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_film",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "film_grain",
+              "params": {
+                "amount": 0.08,
+                "speed": 1.5
+              }
+            },
+            {
+              "type": "film_flicker",
+              "params": {
+                "amount": 0.15,
+                "speed": 1.2
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_depth_blur",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "depth_blur",
+              "params": {
+                "focus_x": 0.5,
+                "focus_y": 0.5,
+                "focus_radius": 0.25,
+                "near_blur": 0.0,
+                "far_blur": 10.0
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_flow",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "flow",
+              "params": {
+                "amount": 0.15,
+                "speed": 1.0,
+                "decay": 0.96
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_pixelation",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "pixelation",
+              "shader": "pixelation",
+              "params": {
+                "aspectRatio": 1.0,
+                "cellSize": 16.0
+              }
+            }
+          ]
+        },
+        {
+          "id": "fx_chromatic",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "chromatic_aberration",
+              "shader": "chromatic_aberration",
+              "params": {
+                "angle": 45.0,
+                "centerX": 0.5,
+                "centerY": 0.5,
+                "direction": 0.0,
+                "intensity": 8.0
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

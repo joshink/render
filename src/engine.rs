@@ -23,6 +23,16 @@ pub struct EngineParams {
     pub _padding: [u32; 3],
 }
 
+/// GPU-side uniform block for custom transition shaders.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TransitionEngineParams {
+    pub progress: f32,
+    pub duration: f32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Serialises a JSON parameter map into a tightly-packed byte buffer for GPU
 /// upload as a custom uniform block.
 ///
@@ -238,6 +248,10 @@ pub struct RenderContext {
     pub texture_a: wgpu::Texture,
     /// Ping-pong texture B (see struct-level docs).
     pub texture_b: wgpu::Texture,
+    /// Ping-pong texture C (intermediate target).
+    pub texture_c: wgpu::Texture,
+    /// Ping-pong texture D (intermediate target).
+    pub texture_d: wgpu::Texture,
     /// Feedback texture A — temporal state for effects like flow.
     pub feedback_texture_a: wgpu::Texture,
     /// Feedback texture B — temporal state for effects like flow.
@@ -245,11 +259,14 @@ pub struct RenderContext {
     pub compositor_params_buffer: wgpu::Buffer,
     pub engine_params_buffer: wgpu::Buffer,
     pub custom_params_buffer: wgpu::Buffer,
+    pub transition_engine_params_buffer: wgpu::Buffer,
+    pub transition_custom_params_buffer: wgpu::Buffer,
     pub compositor_pipeline: wgpu::ComputePipeline,
     pub compositor_bind_group_layout: wgpu::BindGroupLayout,
     /// User-registered custom shader pipelines, keyed by shader asset ID or effect type.
     pub custom_shader_pipelines: std::collections::HashMap<String, wgpu::ComputePipeline>,
     pub effect_bind_group_layout: wgpu::BindGroupLayout,
+    pub transition_bind_group_layout: wgpu::BindGroupLayout,
     pub readback_buffer: wgpu::Buffer,
     /// Row pitch in bytes, aligned to `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`.
     pub bytes_per_row: u32,
@@ -282,7 +299,91 @@ impl RenderContext {
                 }
             }
 
-            if let Some((clip, clip_time)) = active_clip_info {
+            let resolved_transitions = track.resolve_transitions();
+            let active_transition = resolved_transitions.iter().find(|(tr, start)| {
+                time >= *start && time <= *start + tr.duration
+            });
+
+            if let Some((tr, start)) = active_transition {
+                let from_clip = track.clips.iter().find(|c| c.id == tr.from);
+                let to_clip = track.clips.iter().find(|c| c.id == tr.to);
+                if let (Some(from_clip), Some(to_clip)) = (from_clip, to_clip) {
+                    let from_idx = track.clips.iter().position(|c| c.id == tr.from).unwrap();
+                    let to_idx = track.clips.iter().position(|c| c.id == tr.to).unwrap();
+                    let start_from = start_times[from_idx];
+                    let start_to = start_times[to_idx];
+                    
+                    let clip_time_a = (time - start_from).clamp(0.0, from_clip.duration);
+                    let clip_time_b = (time - start_to).clamp(0.0, to_clip.duration);
+                    
+                    let mut sub_input_a = &self.texture_c;
+                    let mut sub_output_a = &self.texture_d;
+                    self.copy_texture(current_input, sub_input_a);
+                    
+                    match from_clip.clip_type {
+                        ClipType::Media | ClipType::Solid => {
+                            self.composite_media_clip(
+                                from_clip, clip_time_a, spec,
+                                &mut sub_input_a, &mut sub_output_a,
+                            );
+                        }
+                        _ => {}
+                    }
+                    
+                    let expanded_effects_a = spec.expand_effects(&from_clip.effects, clip_time_a, from_clip.duration, spec.composition.width, spec.composition.height, 0);
+                    self.dispatch_expanded_effects(
+                        &expanded_effects_a,
+                        time,
+                        clip_time_a,
+                        from_clip.duration,
+                        spec,
+                        &mut sub_input_a,
+                        &mut sub_output_a,
+                    );
+                    
+                    self.copy_texture(sub_input_a, current_output);
+                    
+                    let mut sub_input_b = &self.texture_c;
+                    let mut sub_output_b = &self.texture_d;
+                    self.copy_texture(current_input, sub_input_b);
+                    
+                    match to_clip.clip_type {
+                        ClipType::Media | ClipType::Solid => {
+                            self.composite_media_clip(
+                                to_clip, clip_time_b, spec,
+                                &mut sub_input_b, &mut sub_output_b,
+                            );
+                        }
+                        _ => {}
+                    }
+                    
+                    let expanded_effects_b = spec.expand_effects(&to_clip.effects, clip_time_b, to_clip.duration, spec.composition.width, spec.composition.height, 0);
+                    self.dispatch_expanded_effects(
+                        &expanded_effects_b,
+                        time,
+                        clip_time_b,
+                        to_clip.duration,
+                        spec,
+                        &mut sub_input_b,
+                        &mut sub_output_b,
+                    );
+                    
+                    let transition_dest = sub_output_b;
+                    let progress = ((time - *start).max(0.0) / tr.duration).clamp(0.0, 1.0);
+                    
+                    self.dispatch_transition(
+                        tr,
+                        progress,
+                        current_output,
+                        sub_input_b,
+                        transition_dest,
+                        spec,
+                    );
+                    
+                    self.copy_texture(transition_dest, current_output);
+                    std::mem::swap(&mut current_input, &mut current_output);
+                }
+            } else if let Some((clip, clip_time)) = active_clip_info {
                 match clip.clip_type {
                     ClipType::Media | ClipType::Solid => {
                         self.composite_media_clip(
@@ -385,6 +486,43 @@ impl RenderContext {
         let expanded_effects = spec.expand_effects(&clip.effects, clip_time, clip.duration, spec.composition.width, spec.composition.height, 0);
         let (grayscale, brightness) = crate::config::eval_built_in_effects_from_effects(&expanded_effects, clip_time, clip.duration, spec.composition.width, spec.composition.height);
 
+        let media_texture_ref = clip.asset.as_ref()
+            .and_then(|asset_id| self.gpu_textures.get(asset_id))
+            .unwrap_or(&self.transparent_texture);
+        let media_texture_view = create_default_view(media_texture_ref);
+
+        let mut final_scale = scale;
+        if clip.clip_type == ClipType::Media {
+            let clip_width = media_texture_ref.width() as f32;
+            let clip_height = media_texture_ref.height() as f32;
+            let comp_width = spec.composition.width as f32;
+            let comp_height = spec.composition.height as f32;
+
+            let scale_mode = clip.scale_mode.as_deref().unwrap_or("fit");
+            let base_scale = match scale_mode {
+                "stretch" => [comp_width / clip_width, comp_height / clip_height],
+                "fit" => {
+                    let s = (comp_width / clip_width).min(comp_height / clip_height);
+                    [s, s]
+                }
+                "fill" => {
+                    let s = (comp_width / clip_width).max(comp_height / clip_height);
+                    [s, s]
+                }
+                "natural" => [1.0, 1.0],
+                _ => {
+                    log::warn!("Unknown scale mode '{}', falling back to fit", scale_mode);
+                    let s = (comp_width / clip_width).min(comp_height / clip_height);
+                    [s, s]
+                }
+            };
+            final_scale = [scale[0] * base_scale[0], scale[1] * base_scale[1]];
+        } else if clip.clip_type == ClipType::Solid {
+            let comp_width = spec.composition.width as f32;
+            let comp_height = spec.composition.height as f32;
+            final_scale = [scale[0] * comp_width, scale[1] * comp_height];
+        }
+
         let (clip_type_u32, solid_color) = match clip.clip_type {
             ClipType::Solid => {
                 let color = clip.solid_params.as_ref().map(|p| p.color).unwrap_or([0.0, 0.0, 0.0, 1.0]);
@@ -395,7 +533,7 @@ impl RenderContext {
 
         let comp_params = CompositorParams {
             position,
-            scale,
+            scale: final_scale,
             rotation,
             opacity,
             clip_type: clip_type_u32,
@@ -406,11 +544,6 @@ impl RenderContext {
             solid_color,
         };
         self.queue.write_buffer(&self.compositor_params_buffer, 0, bytemuck::bytes_of(&comp_params));
-
-        let media_texture_ref = clip.asset.as_ref()
-            .and_then(|asset_id| self.gpu_textures.get(asset_id))
-            .unwrap_or(&self.transparent_texture);
-        let media_texture_view = create_default_view(media_texture_ref);
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Compositor Bind Group"),
@@ -572,6 +705,99 @@ impl RenderContext {
                 current_output,
             );
         }
+    }
+
+    fn dispatch_transition(
+        &self,
+        tr: &crate::config::Transition,
+        progress: f32,
+        tex_from: &wgpu::Texture,
+        tex_to: &wgpu::Texture,
+        output_tex: &wgpu::Texture,
+        spec: &RenderSpec,
+    ) {
+        let shader_id = &tr.shader;
+        if let Some(pipeline) = self.custom_shader_pipelines.get(shader_id) {
+            let transition_params = TransitionEngineParams {
+                progress,
+                duration: tr.duration,
+                width: spec.composition.width,
+                height: spec.composition.height,
+            };
+            self.queue.write_buffer(&self.transition_engine_params_buffer, 0, bytemuck::bytes_of(&transition_params));
+
+            let custom_params_data = if let Some(ref p) = tr.params {
+                pack_custom_params(p, progress * tr.duration, tr.duration, spec.composition.width, spec.composition.height)
+            } else {
+                vec![0u8; 16]
+            };
+            self.queue.write_buffer(&self.transition_custom_params_buffer, 0, &custom_params_data);
+
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("Transition Bind Group: {}", shader_id)),
+                layout: &self.transition_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&create_default_view(tex_from)),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&create_default_view(tex_to)),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&create_default_view(output_tex)),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.transition_engine_params_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.transition_custom_params_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some(&format!("Transition Dispatch: {}", shader_id)),
+            });
+            {
+                let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("Transition Compute Pass: {}", shader_id)),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(pipeline);
+                compute_pass.set_bind_group(0, &bind_group, &[]);
+                compute_pass.dispatch_workgroups(self.workgroups_x, self.workgroups_y, 1);
+            }
+            self.queue.submit(Some(encoder.finish()));
+        } else {
+            error!("Transition shader pipeline '{}' not found!", shader_id);
+        }
+    }
+
+    fn copy_texture(&self, source: &wgpu::Texture, destination: &wgpu::Texture) {
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Copy Texture"),
+        });
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture {
+                texture: source,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyTexture {
+                texture: destination,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            self.texture_size,
+        );
+        self.queue.submit(Some(encoder.finish()));
     }
 
     /// Copies the final composited texture back to the CPU and returns the

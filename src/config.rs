@@ -265,10 +265,13 @@ pub struct Transition {
     #[serde(rename = "type")]
     pub transition_type: String,
     pub shader: String,
-    pub start: f32,
+    #[serde(default)]
+    pub start: Option<f32>,
     pub duration: f32,
     pub from: String,
     pub to: String,
+    #[serde(default)]
+    pub params: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// GPU-side uniform block for the built-in effect shader pipeline.
@@ -413,6 +416,25 @@ fn compute_clip_start_times<T: HasDurationAndOffset>(start: f32, clips: &[T]) ->
 impl Track {
     pub fn get_clip_start_times(&self) -> Vec<f32> {
         compute_clip_start_times(self.start, &self.clips)
+    }
+
+    pub fn resolve_transitions(&self) -> Vec<(Transition, f32)> {
+        let clip_starts = self.get_clip_start_times();
+        let mut resolved = Vec::new();
+        for tr in &self.transitions {
+            let start_time = if let Some(s) = tr.start {
+                s
+            } else {
+                if let Some(idx) = self.clips.iter().position(|c| c.id == tr.to) {
+                    let boundary = clip_starts[idx];
+                    boundary - tr.duration * 0.5
+                } else {
+                    0.0
+                }
+            };
+            resolved.push((tr.clone(), start_time));
+        }
+        resolved
     }
 }
 

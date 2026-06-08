@@ -1,0 +1,126 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/05_complex_features.mp4",
+  "composition": {
+    "width": 800,
+    "height": 800,
+    "fps": 30,
+    "duration": 6.0
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    },
+    "custom_wave_shader": {
+      "type": "shader",
+      "path": "test_cases/custom_wave.wgsl"
+    }
+  },
+  "presets": [
+    {
+      "name": "Dreamy Glow",
+      "inputs": [
+        { "name": "blur_radius", "type": "float", "defaultValue": 5.0 },
+        { "name": "glow_intensity", "type": "float", "defaultValue": 1.0 }
+      ],
+      "filters": [
+        {
+          "type": "blur",
+          "params": {
+            "radius": "$blur_radius"
+          }
+        },
+        {
+          "type": "glow",
+          "params": {
+            "intensity": "$glow_intensity",
+            "radius": 4.0,
+            "threshold": 0.4
+          }
+        }
+      ]
+    }
+  ],
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "input_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 6.0
+        }
+      ]
+    },
+    {
+      "id": "dynamic_overlay",
+      "clips": [
+        {
+          "id": "overlay_solid",
+          "type": "solid",
+          "duration": 6.0,
+          "solid_params": {
+            "color": [0.8, 0.4, 0.1, 1.0]
+          },
+          "blend_mode": "overlay",
+          "transform": {
+            "opacity": [
+              { "time": 0.0, "value": 0.0 },
+              { "time": 3.0, "value": 0.8 },
+              { "time": 6.0, "value": 0.0 }
+            ],
+            "scale": {
+              "expression": "[0.8 + 0.2 * sin(clip_time * 2.0), 0.8 + 0.2 * sin(clip_time * 2.0)]"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "wave_layer",
+      "clips": [
+        {
+          "id": "wave_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 6.0,
+          "scale_mode": "fit",
+          "blend_mode": "difference",
+          "transform": {
+            "scale": 0.5,
+            "position": {
+              "expression": "[400.0 + 100.0 * cos(clip_time * 3.0), 400.0 + 100.0 * sin(clip_time * 3.0)]"
+            }
+          },
+          "effects": [
+            {
+              "type": "custom_shader",
+              "shader": "custom_wave_shader",
+              "params": {
+                "amplitude": 0.05,
+                "frequency": 4.0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "effect_preset_layer",
+      "clips": [
+        {
+          "id": "preset_clip",
+          "type": "effect",
+          "preset": "Dreamy Glow",
+          "duration": 6.0,
+          "params": {
+            "glow_intensity": 1.5,
+            "blur_radius": 6.0
+          }
+        }
+      ]
+    }
+  ]
+}

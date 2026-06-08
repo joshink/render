@@ -2,8 +2,8 @@
   "version": "1.0",
   "output": "test_cases/outputs/01_identity.png",
   "composition": {
-    "width": 800,
-    "height": 800,
+    "width": 1024,
+    "height": 1024,
     "fps": 30,
     "duration": 2.0
   },

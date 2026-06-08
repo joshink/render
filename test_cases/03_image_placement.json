@@ -1,0 +1,51 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/03_image_placement.mp4",
+  "composition": {
+    "width": 800,
+    "height": 600,
+    "fps": 30,
+    "duration": 8.0
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    }
+  },
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "placement_fit",
+          "type": "media",
+          "asset": "input_image",
+          "scale_mode": "fit",
+          "duration": 2.0
+        },
+        {
+          "id": "placement_fill",
+          "type": "media",
+          "asset": "input_image",
+          "scale_mode": "fill",
+          "duration": 2.0
+        },
+        {
+          "id": "placement_stretch",
+          "type": "media",
+          "asset": "input_image",
+          "scale_mode": "stretch",
+          "duration": 2.0
+        },
+        {
+          "id": "placement_natural",
+          "type": "media",
+          "asset": "input_image",
+          "scale_mode": "natural",
+          "duration": 2.0
+        }
+      ]
+    }
+  ]
+}

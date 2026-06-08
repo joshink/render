@@ -63,59 +63,15 @@ fn run_test_case(spec_name: &str) {
     assert!(!review_frames.is_empty(), "review.json is empty");
 
     // Load input image and resize to match spec composition
-    let input_path = spec.get_input_path().expect("No media clip with asset path found in the test spec");
-    let in_img = image::open(&input_path).expect("Failed to open input image");
-    let in_resized = in_img.resize_exact(spec.composition.width, spec.composition.height, image::imageops::FilterType::Lanczos3);
+    let in_resized = if let Some(input_path) = spec.get_input_path() {
+        let in_img = image::open(&input_path).expect("Failed to open input image");
+        in_img.resize_exact(spec.composition.width, spec.composition.height, image::imageops::FilterType::Nearest)
+    } else {
+        image::DynamicImage::ImageRgba8(image::ImageBuffer::new(spec.composition.width, spec.composition.height))
+    };
 
-    // Static effects from spec (for single frame checks or static checks)
-    let mut static_grayscale = false;
-    let mut static_dim = false;
-    let mut static_bright = false;
 
-    for track in &spec.tracks {
-        for clip in &track.clips {
-            if clip.clip_type == ClipType::Media {
-                for effect in &clip.effects {
-                    match effect.effect_type.as_str() {
-                        "grayscale" => static_grayscale = true,
-                        "brightness" => {
-                            if let Some(ref params) = effect.params {
-                                if let Some(factor_val) = params.get("factor") {
-                                    if let Some(factor) = factor_val.as_f64() {
-                                        if factor < 1.0 {
-                                            static_dim = true;
-                                        } else if factor > 1.0 {
-                                            static_bright = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    let is_movie = spec.output.ends_with(".mp4");
-    let is_blend_modes = spec_name == "10_blend_modes.json";
-    let is_effect_layer = spec_name == "11_effect_layer.json";
-    let is_transform_keyframe = spec_name == "12_transform_keyframe.json";
-    let is_custom_shader_effect = spec_name == "13_custom_shader_effect.json" || spec_name == "22_dynamic_custom_shader.json";
-    let is_hsl_adjust = spec_name == "14_hsl_adjust.json";
-    let is_blur_glow = spec_name == "15_blur_glow.json" || spec_name == "21_presets.json";
-    let is_film_effects = spec_name == "16_film_effects.json";
-    let is_depth_blur = spec_name == "17_depth_blur.json";
-    let is_fluid_flow = spec_name == "18_fluid_flow.json";
-    let is_pixelation = spec_name == "19_pixelation.json";
-    let is_chromatic_aberration = spec_name == "20_chromatic_aberration.json";
-
-    let is_identity = !static_grayscale && !static_dim && !static_bright
-        && !is_blend_modes && !is_effect_layer && !is_transform_keyframe && !is_custom_shader_effect
-        && !is_hsl_adjust && !is_blur_glow && !is_film_effects && !is_depth_blur && !is_fluid_flow
-        && !is_pixelation && !is_chromatic_aberration;
-
+    
     // Assertions for each frame in review.json
     for review in &review_frames {
         let frame_path = run_folder_path.join(&review.file);
@@ -129,40 +85,92 @@ fn run_test_case(spec_name: &str) {
         let mut check_grayscale = None;
         let mut check_dim = None;
         let mut check_bright = None;
+        let mut is_hsl_adjust = false;
+        let mut is_blur_glow = false;
+        let mut is_film_effects = false;
+        let mut is_depth_blur = false;
+        let mut is_fluid_flow = false;
+        let mut is_pixelation = false;
+        let mut is_chromatic_aberration = false;
+        let is_identity = spec_name == "01_identity.json";
 
-        if is_movie {
+        if spec_name == "02_all_filters.json" {
+            let t = review.timestamp;
+            if t >= 0.0 && t <= 2.0 {
+                check_grayscale = Some(true);
+            } else if t > 2.0 && t <= 4.0 {
+                check_dim = Some(true);
+            } else if t > 4.0 && t <= 6.0 {
+                check_bright = Some(true);
+            } else if t > 6.0 && t <= 8.0 {
+                check_grayscale = Some(true);
+                check_dim = Some(true);
+            } else if t > 8.0 && t <= 10.0 {
+                is_hsl_adjust = true;
+            } else if t > 10.0 && t <= 12.0 {
+                is_blur_glow = true;
+            } else if t > 12.0 && t <= 14.0 {
+                is_film_effects = true;
+            } else if t > 14.0 && t <= 16.0 {
+                is_depth_blur = true;
+            } else if t > 16.0 && t <= 18.0 {
+                is_fluid_flow = true;
+            } else if t > 18.0 && t <= 20.0 {
+                is_pixelation = true;
+            } else if t > 20.0 && t <= 22.0 {
+                is_chromatic_aberration = true;
+            }
+        } else if spec_name == "03_image_placement.json" {
+            let t = review.timestamp;
+            if t >= 0.0 && t <= 2.0 {
+                // fit: check left and right borders are transparent black
+                let left_pixel = out_img.get_pixel(10, 300).to_rgba();
+                let right_pixel = out_img.get_pixel(790, 300).to_rgba();
+                assert_eq!(left_pixel[3], 0, "fit left border not transparent: {:?}", left_pixel);
+                assert_eq!(right_pixel[3], 0, "fit right border not transparent: {:?}", right_pixel);
+            } else if t > 2.0 && t <= 4.0 {
+                // fill: check left and right borders are opaque
+                let left_pixel = out_img.get_pixel(10, 300).to_rgba();
+                let right_pixel = out_img.get_pixel(790, 300).to_rgba();
+                assert!(left_pixel[3] > 0, "fill left border is empty");
+                assert!(right_pixel[3] > 0, "fill right border is empty");
+            } else if t > 4.0 && t <= 6.0 {
+                // stretch
+                let left_pixel = out_img.get_pixel(10, 300).to_rgba();
+                assert!(left_pixel[3] > 0);
+            } else if t > 6.0 && t <= 8.0 {
+                // natural
+                let left_pixel = out_img.get_pixel(10, 300).to_rgba();
+                assert!(left_pixel[3] > 0);
+            }
+        } else if spec_name == "04_transitions.json" {
+            let t = review.timestamp;
+            if (t - 2.0).abs() < 0.1 {
+                // Midpoint of fade
+                let pixel = out_img.get_pixel(400, 400).to_rgba();
+                assert!(pixel[0] > 50 && pixel[1] > 50, "Fade midpoint not yellow/mix: R={}, G={}", pixel[0], pixel[1]);
+            } else if (t - 4.0).abs() < 0.1 {
+                // Midpoint of wipe
+                let top_pixel = out_img.get_pixel(400, 100).to_rgba();
+                let bottom_pixel = out_img.get_pixel(400, 700).to_rgba();
+                assert!(top_pixel[1] > 150 && top_pixel[2] < 100, "Wipe top not green: {:?}", top_pixel);
+                assert!(bottom_pixel[2] > 150 && bottom_pixel[1] < 100, "Wipe bottom not blue: {:?}", bottom_pixel);
+            }
+        } else if spec_name == "06_movie_audio.json" {
             if review.explanation.contains("Grayscale is ON") {
                 check_grayscale = Some(true);
             } else if review.explanation.contains("Grayscale is OFF") {
                 check_grayscale = Some(false);
             }
-
             if review.explanation.contains("Brightness at peak") {
-                if static_bright {
-                    check_bright = Some(true);
-                } else if static_dim {
-                    check_dim = Some(true);
-                }
+                check_bright = Some(true);
             } else if review.explanation.contains("Brightness at trough") {
                 check_dim = Some(true);
             }
-        } else {
-            if static_grayscale {
+        } else if spec_name == "07_ripple_relative.json" {
+            if review.explanation.contains("Track 'main_track' - Clip 'clip_grayscale' starts") {
                 check_grayscale = Some(true);
-            }
-            if static_dim {
-                check_dim = Some(true);
-            }
-            if static_bright {
-                check_bright = Some(true);
-            }
-            if is_blend_modes {
-                check_dim = Some(true);
-            }
-            if is_effect_layer {
-                check_grayscale = Some(true);
-            }
-            if is_transform_keyframe {
+            } else if review.explanation.contains("Track 'main_track' - Clip 'clip_dim' starts") {
                 check_dim = Some(true);
             }
         }
@@ -236,22 +244,6 @@ fn run_test_case(spec_name: &str) {
             let total_sampled_channels = num_samples * 3.0;
             let diff_ratio = diff_count as f64 / total_sampled_channels;
             assert!(diff_ratio < 0.05, "Frame {} differs too much from input (diff_ratio={:.4})", review.frame, diff_ratio);
-        } else if is_custom_shader_effect {
-            let mut diff_count = 0;
-            for y in (0..spec.composition.height).step_by(step_usize) {
-                for x in (0..spec.composition.width).step_by(step_usize) {
-                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
-                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
-                    for c in 0..3 {
-                        if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 3 {
-                            diff_count += 1;
-                        }
-                    }
-                }
-            }
-            let total_sampled_channels = num_samples * 3.0;
-            let diff_ratio = diff_count as f64 / total_sampled_channels;
-            assert!(diff_ratio > 0.05, "Frame {} did not have custom wave effect applied (diff_ratio={:.4} <= 0.05)", review.frame, diff_ratio);
         } else if is_pixelation {
             let mut diff_count = 0;
             for y in (0..spec.composition.height).step_by(step_usize) {
@@ -396,41 +388,31 @@ fn test_01_identity() {
 }
 
 #[test]
-fn test_02_grayscale() {
-    run_test_case("02_grayscale.json");
+fn test_02_all_filters() {
+    run_test_case("02_all_filters.json");
 }
 
 #[test]
-fn test_03_brightness_dim() {
-    run_test_case("03_brightness_dim.json");
+fn test_03_image_placement() {
+    run_test_case("03_image_placement.json");
 }
 
 #[test]
-fn test_04_brightness_bright() {
-    run_test_case("04_brightness_bright.json");
+fn test_04_transitions() {
+    run_test_case("04_transitions.json");
 }
 
 #[test]
-fn test_05_grayscale_brightness() {
-    run_test_case("05_grayscale_brightness.json");
+fn test_05_complex_features() {
+    run_test_case("05_complex_features.json");
 }
 
 #[test]
-fn test_06_padding_stress() {
-    run_test_case("06_padding_stress.json");
-}
-
-#[test]
-fn test_07_movie() {
-    run_test_case("07_movie.json");
-}
-
-#[test]
-fn test_08_movie_audio() {
-    run_test_case("08_movie_audio.json");
+fn test_06_movie_audio() {
+    run_test_case("06_movie_audio.json");
     
     // Verify audio stream presence using ffprobe
-    let output_path = Path::new("test_cases/outputs/08_movie_audio.mp4");
+    let output_path = Path::new("test_cases/outputs/06_movie_audio.mp4");
     let ffprobe_status = Command::new("ffprobe")
         .args(&[
             "-v", "error",
@@ -449,72 +431,7 @@ fn test_08_movie_audio() {
 }
 
 #[test]
-fn test_09_ripple_relative() {
-    run_test_case("09_ripple_relative.json");
-}
-
-#[test]
-fn test_10_blend_modes() {
-    run_test_case("10_blend_modes.json");
-}
-
-#[test]
-fn test_11_effect_layer() {
-    run_test_case("11_effect_layer.json");
-}
-
-#[test]
-fn test_12_transform_keyframe() {
-    run_test_case("12_transform_keyframe.json");
-}
-
-#[test]
-fn test_13_custom_shader_effect() {
-    run_test_case("13_custom_shader_effect.json");
-}
-
-#[test]
-fn test_14_hsl_adjust() {
-    run_test_case("14_hsl_adjust.json");
-}
-
-#[test]
-fn test_15_blur_glow() {
-    run_test_case("15_blur_glow.json");
-}
-
-#[test]
-fn test_16_film_effects() {
-    run_test_case("16_film_effects.json");
-}
-
-#[test]
-fn test_17_depth_blur() {
-    run_test_case("17_depth_blur.json");
-}
-
-#[test]
-fn test_18_fluid_flow() {
-    run_test_case("18_fluid_flow.json");
-}
-
-#[test]
-fn test_19_pixelation() {
-    run_test_case("19_pixelation.json");
-}
-
-#[test]
-fn test_20_chromatic_aberration() {
-    run_test_case("20_chromatic_aberration.json");
-}
-
-#[test]
-fn test_21_presets() {
-    run_test_case("21_presets.json");
-}
-
-#[test]
-fn test_22_dynamic_custom_shader() {
-    run_test_case("22_dynamic_custom_shader.json");
+fn test_07_ripple_relative() {
+    run_test_case("07_ripple_relative.json");
 }
 

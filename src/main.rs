@@ -1,6 +1,6 @@
 use log::{LevelFilter, error, info};
 use render_poc::config::*;
-use render_poc::engine::{EngineParams, RenderContext};
+use render_poc::engine::{EngineParams, RenderContext, TransitionEngineParams};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
@@ -190,15 +190,9 @@ fn load_asset_images(spec: &RenderSpec) -> HashMap<String, image::RgbaImage> {
             Asset::Image { path } | Asset::Video { path } => {
                 let img =
                     image::open(path).unwrap_or_else(|_| panic!("Failed to load asset: {}", path));
-                let img = img
-                    .resize_exact(
-                        spec.composition.width,
-                        spec.composition.height,
-                        image::imageops::FilterType::Lanczos3,
-                    )
-                    .to_rgba8();
+                let img = img.to_rgba8();
+                info!("Loaded asset '{}' from {} ({}x{})", asset_id, path, img.width(), img.height());
                 cpu_images.insert(asset_id.clone(), img);
-                info!("Loaded asset '{}' from {}", asset_id, path);
             }
             _ => {}
         }
@@ -464,6 +458,8 @@ fn main() {
 
     let texture_a = device.create_texture(&texture_desc);
     let texture_b = device.create_texture(&texture_desc);
+    let texture_c = device.create_texture(&texture_desc);
+    let texture_d = device.create_texture(&texture_desc);
     let feedback_texture_a = device.create_texture(&texture_desc);
     let feedback_texture_b = device.create_texture(&texture_desc);
 
@@ -567,6 +563,20 @@ fn main() {
 
     let custom_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Custom Params Buffer"),
+        size: 1024,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let transition_engine_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Transition Engine Params Buffer"),
+        size: std::mem::size_of::<TransitionEngineParams>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let transition_custom_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Transition Custom Params Buffer"),
         size: 1024,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
@@ -759,6 +769,68 @@ fn main() {
         push_constant_ranges: &[],
     });
 
+    let transition_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Transition Bind Group Layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let transition_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Transition Pipeline Layout"),
+        bind_group_layouts: &[&transition_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
     // Scan default directory "shaders/" and --include paths
     let mut wgsl_files = Vec::new();
     
@@ -791,6 +863,13 @@ fn main() {
         }
     }
 
+    let mut transition_shaders = std::collections::HashSet::new();
+    for track in &spec.tracks {
+        for tr in &track.transitions {
+            transition_shaders.insert(tr.shader.clone());
+        }
+    }
+
     let mut custom_shader_pipelines = HashMap::new();
 
     for file_path in wgsl_files {
@@ -807,6 +886,10 @@ fn main() {
             }
         };
         
+        let is_transition = transition_shaders.contains(&file_stem)
+            || shader_str.contains("TransitionEngineParams")
+            || shader_str.contains("tex_to");
+        
         if let Some(metadata_str) = extract_metadata(&shader_str) {
             match serde_json::from_str::<EffectMetadata>(&metadata_str) {
                 Ok(meta) => {
@@ -818,9 +901,11 @@ fn main() {
                         label: Some(&effect_type),
                         source: wgpu::ShaderSource::Wgsl(shader_str.into()),
                     });
+                    let is_tr = transition_shaders.contains(&effect_type) || is_transition;
+                    let layout = if is_tr { &transition_pipeline_layout } else { &effect_pipeline_layout };
                     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                         label: Some(&effect_type),
-                        layout: Some(&effect_pipeline_layout),
+                        layout: Some(layout),
                         module: &shader_module,
                         entry_point: "main",
                         cache: None,
@@ -838,9 +923,10 @@ fn main() {
                 label: Some(&file_stem),
                 source: wgpu::ShaderSource::Wgsl(shader_str.into()),
             });
+            let layout = if is_transition { &transition_pipeline_layout } else { &effect_pipeline_layout };
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(&file_stem),
-                layout: Some(&effect_pipeline_layout),
+                layout: Some(layout),
                 module: &shader_module,
                 entry_point: "main",
                 cache: None,
@@ -855,20 +941,24 @@ fn main() {
         if let Asset::Shader { path } = asset {
             if !custom_shader_pipelines.contains_key(asset_id) {
                 let shader_str = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Failed to read shader {}", path));
+                let is_tr = transition_shaders.contains(asset_id)
+                    || shader_str.contains("TransitionEngineParams")
+                    || shader_str.contains("tex_to");
                 let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(asset_id),
                     source: wgpu::ShaderSource::Wgsl(shader_str.into()),
                 });
+                let layout = if is_tr { &transition_pipeline_layout } else { &effect_pipeline_layout };
                 let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(asset_id),
-                    layout: Some(&effect_pipeline_layout),
+                    layout: Some(layout),
                     module: &shader_module,
                     entry_point: "main",
                     cache: None,
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 });
                 custom_shader_pipelines.insert(asset_id.clone(), pipeline);
-                info!("Compiled spec-declared shader pipeline: {}", asset_id);
+                info!("Compiled spec-declared {} shader pipeline: {}", if is_tr { "transition" } else { "effect" }, asset_id);
             }
         }
     }
@@ -887,15 +977,20 @@ fn main() {
         transparent_texture,
         texture_a,
         texture_b,
+        texture_c,
+        texture_d,
         feedback_texture_a,
         feedback_texture_b,
         compositor_params_buffer,
         engine_params_buffer,
         custom_params_buffer,
+        transition_engine_params_buffer,
+        transition_custom_params_buffer,
         compositor_pipeline,
         compositor_bind_group_layout,
         custom_shader_pipelines,
         effect_bind_group_layout,
+        transition_bind_group_layout,
         readback_buffer,
         bytes_per_row,
         texture_size,

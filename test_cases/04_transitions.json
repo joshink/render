@@ -1,0 +1,74 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/04_transitions.mp4",
+  "composition": {
+    "width": 800,
+    "height": 800,
+    "fps": 30,
+    "duration": 6.0
+  },
+  "assets": {
+    "fade_shader": {
+      "type": "shader",
+      "path": "shaders/fade.wgsl"
+    },
+    "wipe_shader": {
+      "type": "shader",
+      "path": "shaders/wipe.wgsl"
+    }
+  },
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "red_clip",
+          "type": "solid",
+          "duration": 2.0,
+          "solid_params": {
+            "color": [0.8, 0.2, 0.2, 1.0]
+          }
+        },
+        {
+          "id": "green_clip",
+          "type": "solid",
+          "duration": 2.0,
+          "solid_params": {
+            "color": [0.2, 0.8, 0.2, 1.0]
+          }
+        },
+        {
+          "id": "blue_clip",
+          "type": "solid",
+          "duration": 2.0,
+          "solid_params": {
+            "color": [0.2, 0.2, 0.8, 1.0]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "fade_trans",
+          "type": "custom_shader",
+          "shader": "fade_shader",
+          "start": 1.5,
+          "duration": 1.0,
+          "from": "red_clip",
+          "to": "green_clip"
+        },
+        {
+          "id": "wipe_trans",
+          "type": "custom_shader",
+          "shader": "wipe_shader",
+          "start": 3.5,
+          "duration": 1.0,
+          "from": "green_clip",
+          "to": "blue_clip",
+          "params": {
+            "direction": 1.0
+          }
+        }
+      ]
+    }
+  ]
+}
