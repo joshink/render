@@ -832,7 +832,7 @@ fn main() {
     };
 
     let render_frame = |time: f32| -> Vec<u8> {
-        render_context.render_frame(time, &spec, is_movie)
+        render_context.render_frame(time, &spec)
     };
 
     if is_movie {

@@ -130,7 +130,7 @@ impl RenderContext {
     /// Walks every track bottom-to-top, composites active media/solid clips,
     /// dispatches effect shaders, and returns the final RGBA pixel buffer
     /// with premultiplied alpha.
-    pub fn render_frame(&self, time: f32, spec: &RenderSpec, is_movie: bool) -> Vec<u8> {
+    pub fn render_frame(&self, time: f32, spec: &RenderSpec) -> Vec<u8> {
         let mut current_input = &self.texture_a;
         let mut current_output = &self.texture_b;
 
@@ -152,7 +152,7 @@ impl RenderContext {
                 match clip.clip_type {
                     ClipType::Media | ClipType::Solid => {
                         self.composite_media_clip(
-                            clip, clip_time, spec, is_movie,
+                            clip, clip_time, spec,
                             &mut current_input, &mut current_output,
                         );
                     }
@@ -182,7 +182,6 @@ impl RenderContext {
                             clip_time,
                             clip.duration,
                             spec,
-                            is_movie,
                             &mut current_input,
                             &mut current_output,
                         );
@@ -241,7 +240,6 @@ impl RenderContext {
         clip: &Clip,
         clip_time: f32,
         spec: &RenderSpec,
-        is_movie: bool,
         current_input: &mut &'a wgpu::Texture,
         current_output: &mut &'a wgpu::Texture,
     ) {
@@ -251,7 +249,7 @@ impl RenderContext {
         let opacity = clip.eval_opacity(clip_time, spec.composition.width, spec.composition.height);
         let blend_mode_u32 = clip.blend_mode.as_ref().map(|b| b.clone().as_u32()).unwrap_or(0);
         let expanded_effects = spec.expand_effects(&clip.effects, clip_time, spec.composition.width, spec.composition.height, 0);
-        let (grayscale, brightness) = crate::config::eval_built_in_effects_from_effects(&expanded_effects, clip_time, is_movie);
+        let (grayscale, brightness) = crate::config::eval_built_in_effects_from_effects(&expanded_effects, clip_time, spec.composition.width, spec.composition.height);
 
         let (clip_type_u32, solid_color) = match clip.clip_type {
             ClipType::Solid => {
@@ -409,12 +407,11 @@ impl RenderContext {
         time: f32,
         clip_time: f32,
         spec: &RenderSpec,
-        is_movie: bool,
         current_input: &mut &'a wgpu::Texture,
         current_output: &mut &'a wgpu::Texture,
     ) {
         let built_in_params = crate::config::eval_shader_params_from_effects(
-            effects, clip_time, spec.composition.width, spec.composition.height, time, is_movie
+            effects, clip_time, spec.composition.width, spec.composition.height, time
         );
         self.queue.write_buffer(&self.built_in_params_buffer, 0, bytemuck::bytes_of(&built_in_params));
 
@@ -486,7 +483,6 @@ impl RenderContext {
         clip_time: f32,
         duration: f32,
         spec: &RenderSpec,
-        is_movie: bool,
         current_input: &mut &'a wgpu::Texture,
         current_output: &mut &'a wgpu::Texture,
     ) {
@@ -502,7 +498,6 @@ impl RenderContext {
                         time,
                         clip_time,
                         spec,
-                        is_movie,
                         current_input,
                         current_output,
                     );
@@ -532,7 +527,6 @@ impl RenderContext {
                 time,
                 clip_time,
                 spec,
-                is_movie,
                 current_input,
                 current_output,
             );

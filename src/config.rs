@@ -7,18 +7,7 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
-use evalexpr::{eval_with_context, ContextWithMutableVariables, HashMapContext};
-
-// ---------------------------------------------------------------------------
-// Movie-mode oscillation constants
-// ---------------------------------------------------------------------------
-
-/// Amplitude of the sinusoidal brightness oscillation in movie mode.
-const BRIGHTNESS_OSCILLATION_AMPLITUDE: f32 = 0.8;
-
-/// Frequency multiplier (cycles per second, before the 2π factor) for
-/// the brightness oscillation in movie mode.
-const BRIGHTNESS_OSCILLATION_FREQ: f32 = 2.0;
+use evalexpr::{eval_with_context, ContextWithMutableVariables, ContextWithMutableFunctions, HashMapContext};
 
 // ---------------------------------------------------------------------------
 // Data model — deserialized from the JSON render spec
@@ -533,12 +522,12 @@ impl RenderSpec {
                                 let mut t = 0.5;
                                 while t < clip.duration {
                                     let abs_time = clip_start + t;
-                                    let is_on = (t * std::f32::consts::PI).sin() > 0.0;
+                                    let enabled = read_effect_float(effect, "enabled", t, self.composition.width, self.composition.height, 1.0) > 0.5;
                                     events.push((
                                         abs_time,
                                         format!(
                                             "Track '{}' - Clip '{}' - Grayscale is {}",
-                                            track.id, clip.id, if is_on { "ON" } else { "OFF" }
+                                            track.id, clip.id, if enabled { "ON" } else { "OFF" }
                                         ),
                                     ));
                                     t += 1.0;
@@ -547,16 +536,18 @@ impl RenderSpec {
                             "brightness" => {
                                 let mut t = 0.25;
                                 while t < clip.duration {
+                                    let abs_time = clip_start + t;
                                     events.push((
-                                        clip_start + t,
+                                        abs_time,
                                         format!("Track '{}' - Clip '{}' - Brightness at peak (factor oscillation)", track.id, clip.id),
                                     ));
                                     t += 1.0;
                                 }
                                 let mut t = 0.75;
                                 while t < clip.duration {
+                                    let abs_time = clip_start + t;
                                     events.push((
-                                        clip_start + t,
+                                        abs_time,
                                         format!("Track '{}' - Clip '{}' - Brightness at trough (factor oscillation)", track.id, clip.id),
                                     ));
                                     t += 1.0;
@@ -606,43 +597,30 @@ impl Clip {
             .unwrap_or(1.0)
     }
 
-    pub fn eval_built_in_effects(&self, clip_time: f32, is_movie: bool) -> (u32, f32) {
-        eval_built_in_effects_from_effects(&self.effects, clip_time, is_movie)
+    pub fn eval_built_in_effects(&self, clip_time: f32, w: u32, h: u32) -> (u32, f32) {
+        eval_built_in_effects_from_effects(&self.effects, clip_time, w, h)
     }
 
     pub fn get_depth_map_asset_id(&self) -> Option<String> {
         get_depth_map_asset_id_from_effects(&self.effects)
     }
 
-    pub fn eval_shader_params(&self, clip_time: f32, comp_width: u32, comp_height: u32, time: f32, is_movie: bool) -> ShaderParams {
-        eval_shader_params_from_effects(&self.effects, clip_time, comp_width, comp_height, time, is_movie)
+    pub fn eval_shader_params(&self, clip_time: f32, comp_width: u32, comp_height: u32, time: f32) -> ShaderParams {
+        eval_shader_params_from_effects(&self.effects, clip_time, comp_width, comp_height, time)
     }
 }
 
-pub fn eval_built_in_effects_from_effects(effects: &[Effect], clip_time: f32, is_movie: bool) -> (u32, f32) {
+pub fn eval_built_in_effects_from_effects(effects: &[Effect], clip_time: f32, w: u32, h: u32) -> (u32, f32) {
     let mut grayscale = 0u32;
     let mut brightness = 1.0f32;
     for effect in effects {
         match effect.effect_type.as_str() {
             "grayscale" => {
-                grayscale = 1;
-                if is_movie {
-                    grayscale = if (clip_time * std::f32::consts::PI).sin() > 0.0 { 1 } else { 0 };
-                }
+                let enabled = read_effect_float(effect, "enabled", clip_time, w, h, 1.0) > 0.5;
+                grayscale = if enabled { 1 } else { 0 };
             }
             "brightness" => {
-                if let Some(ref params) = effect.params {
-                    if let Some(factor_val) = params.get("factor") {
-                        if let Some(factor) = factor_val.as_f64() {
-                            brightness = factor as f32;
-                        }
-                    }
-                }
-                if is_movie {
-                    brightness = brightness
-                        * (1.0 + BRIGHTNESS_OSCILLATION_AMPLITUDE
-                            * (clip_time * BRIGHTNESS_OSCILLATION_FREQ * std::f32::consts::PI).sin());
-                }
+                brightness = read_effect_float(effect, "factor", clip_time, w, h, 1.0);
             }
             _ => {}
         }
@@ -671,7 +649,6 @@ pub fn eval_shader_params_from_effects(
     comp_width: u32,
     comp_height: u32,
     time: f32,
-    is_movie: bool,
 ) -> ShaderParams {
     let mut params = ShaderParams {
         grayscale_enabled: 0,
@@ -706,20 +683,11 @@ pub fn eval_shader_params_from_effects(
     for effect in effects {
         match effect.effect_type.as_str() {
             "grayscale" => {
-                let mut enabled = read_effect_float(effect, "enabled", clip_time, comp_width, comp_height, 1.0) > 0.5;
-                if is_movie {
-                    enabled = enabled && (clip_time * std::f32::consts::PI).sin() > 0.0;
-                }
+                let enabled = read_effect_float(effect, "enabled", clip_time, comp_width, comp_height, 1.0) > 0.5;
                 params.grayscale_enabled = if enabled { 1 } else { 0 };
             }
             "brightness" => {
-                let mut factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
-                if is_movie {
-                    factor = factor
-                        * (1.0 + BRIGHTNESS_OSCILLATION_AMPLITUDE
-                            * (clip_time * BRIGHTNESS_OSCILLATION_FREQ * std::f32::consts::PI).sin());
-                }
-                params.brightness_factor = factor;
+                params.brightness_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
             }
             "contrast" => {
                 params.contrast_factor = read_effect_float(effect, "factor", clip_time, comp_width, comp_height, 1.0);
@@ -925,9 +893,12 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, width: u32, heig
 /// `clip_time`, `comp_width`, `comp_height`, and `pi` available as variables.
 /// Falls back to a plain `f32::parse` if the expression engine can't handle it.
 pub fn evaluate_simple_expression(expr: &str, clip_time: f32, width: u32, height: u32, default: f32) -> f32 {
-    // evalexpr uses underscores for member access; replace dots so that
-    // decimal literals like "0.5" become "0_5" (handled by the engine).
-    let cleaned_expr = expr.replace(".", "_");
+    // Replace dots only in recognized variable names to avoid mangling decimal literals.
+    let cleaned_expr = expr
+        .replace("comp.width", "comp_width")
+        .replace("comp.height", "comp_height")
+        .replace("clip.time", "clip_time")
+        .replace("clip.duration", "clip_duration");
     let mut context = HashMapContext::new();
     let _ = context.set_value("time".into(), (clip_time as f64).into());
     let _ = context.set_value("clip_time".into(), (clip_time as f64).into());
@@ -935,13 +906,60 @@ pub fn evaluate_simple_expression(expr: &str, clip_time: f32, width: u32, height
     let _ = context.set_value("comp_height".into(), (height as i64).into());
     let _ = context.set_value("pi".into(), (std::f64::consts::PI).into());
 
-    // Try evaluating as a float expression first
-    if let Ok(evalexpr::Value::Float(result)) = eval_with_context(&cleaned_expr, &context) {
-        return result as f32;
+    fn get_float(val: &evalexpr::Value) -> Result<f64, evalexpr::EvalexprError> {
+        if let Ok(f) = val.as_float() {
+            Ok(f)
+        } else if let Ok(i) = val.as_int() {
+            Ok(i as f64)
+        } else {
+            Err(evalexpr::EvalexprError::expected_number(val.clone()))
+        }
     }
-    // Integer expressions (e.g. "comp_width / 2") yield an Int
-    if let Ok(evalexpr::Value::Int(result)) = eval_with_context(&cleaned_expr, &context) {
-        return result as f32;
+
+    let _ = context.set_function("sin".into(), evalexpr::Function::new(|argument| {
+        let val = get_float(argument)?;
+        Ok(evalexpr::Value::Float(val.sin()))
+    }));
+
+    let _ = context.set_function("cos".into(), evalexpr::Function::new(|argument| {
+        let val = get_float(argument)?;
+        Ok(evalexpr::Value::Float(val.cos()))
+    }));
+
+    let _ = context.set_function("tan".into(), evalexpr::Function::new(|argument| {
+        let val = get_float(argument)?;
+        Ok(evalexpr::Value::Float(val.tan()))
+    }));
+
+    let _ = context.set_function("abs".into(), evalexpr::Function::new(|argument| {
+        let val = get_float(argument)?;
+        Ok(evalexpr::Value::Float(val.abs()))
+    }));
+
+    let _ = context.set_function("sqrt".into(), evalexpr::Function::new(|argument| {
+        let val = get_float(argument)?;
+        Ok(evalexpr::Value::Float(val.sqrt()))
+    }));
+
+    let _ = context.set_function("pow".into(), evalexpr::Function::new(|argument| {
+        let tuple = argument.as_tuple()?;
+        if tuple.len() != 2 {
+            return Err(evalexpr::EvalexprError::CustomMessage(format!(
+                "pow expects exactly 2 arguments, got {}",
+                tuple.len()
+            )));
+        }
+        let base = get_float(&tuple[0])?;
+        let exponent = get_float(&tuple[1])?;
+        Ok(evalexpr::Value::Float(base.powf(exponent)))
+    }));
+
+    let eval_res = eval_with_context(&cleaned_expr, &context);
+    match eval_res {
+        Ok(evalexpr::Value::Float(result)) => return result as f32,
+        Ok(evalexpr::Value::Int(result)) => return result as f32,
+        Ok(other) => log::warn!("eval_with_context returned non-numeric value: {:?}", other),
+        Err(e) => log::debug!("eval_with_context failed for '{}': {:?}", cleaned_expr, e),
     }
 
     // Fallback: try parsing the raw string as a number
