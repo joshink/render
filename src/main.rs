@@ -52,6 +52,7 @@ struct CliArgs {
     spec_path: std::path::PathBuf,
     debug_dir: Option<std::path::PathBuf>,
     include_paths: Vec<std::path::PathBuf>,
+    overrides: Vec<(String, String)>,
 }
 
 fn parse_args() -> CliArgs {
@@ -59,6 +60,7 @@ fn parse_args() -> CliArgs {
     let mut spec_path_str = None;
     let mut debug_dir_path_str = None;
     let mut include_paths = Vec::new();
+    let mut overrides = Vec::new();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -89,6 +91,68 @@ fn parse_args() -> CliArgs {
                     std::process::exit(1);
                 }
             }
+            "-o" | "--output" => {
+                if i + 1 < args.len() {
+                    overrides.push(("output".to_string(), args[i + 1].clone()));
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for -o/--output option");
+                    std::process::exit(1);
+                }
+            }
+            "--width" => {
+                if i + 1 < args.len() {
+                    overrides.push(("composition.width".to_string(), args[i + 1].clone()));
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --width option");
+                    std::process::exit(1);
+                }
+            }
+            "--height" => {
+                if i + 1 < args.len() {
+                    overrides.push(("composition.height".to_string(), args[i + 1].clone()));
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --height option");
+                    std::process::exit(1);
+                }
+            }
+            "--fps" => {
+                if i + 1 < args.len() {
+                    overrides.push(("composition.fps".to_string(), args[i + 1].clone()));
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --fps option");
+                    std::process::exit(1);
+                }
+            }
+            "--duration" => {
+                if i + 1 < args.len() {
+                    overrides.push(("composition.duration".to_string(), args[i + 1].clone()));
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --duration option");
+                    std::process::exit(1);
+                }
+            }
+            "--set" => {
+                if i + 1 < args.len() {
+                    let kv = args[i + 1].clone();
+                    if let Some(pos) = kv.find('=') {
+                        let key = kv[..pos].to_string();
+                        let val = kv[pos + 1..].to_string();
+                        overrides.push((key, val));
+                    } else {
+                        eprintln!("Error: Invalid format for --set, expected key=value, got: {}", kv);
+                        std::process::exit(1);
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --set option");
+                    std::process::exit(1);
+                }
+            }
             s if s.starts_with('-') => {
                 eprintln!("Error: Unknown option: {}", s);
                 std::process::exit(1);
@@ -101,7 +165,7 @@ fn parse_args() -> CliArgs {
     }
 
     let spec_path_str = spec_path_str.unwrap_or_else(|| {
-        eprintln!("Usage: render-poc [-i <spec.json>] [--debug <dir>] [-I <path>]");
+        eprintln!("Usage: render-poc [-i <spec.json>] [--debug <dir>] [-I <path>] [-o/--output <path>] [--width <val>] [--height <val>] [--fps <val>] [--duration <val>] [--set <key=value>]");
         std::process::exit(1);
     });
 
@@ -109,7 +173,64 @@ fn parse_args() -> CliArgs {
         spec_path: std::path::PathBuf::from(spec_path_str),
         debug_dir: debug_dir_path_str.map(std::path::PathBuf::from),
         include_paths,
+        overrides,
     }
+}
+
+fn apply_override(json: &mut serde_json::Value, path: &str, value_str: &str) -> Result<(), String> {
+    let json_val = if let Ok(n) = value_str.parse::<i64>() {
+        serde_json::Value::Number(n.into())
+    } else if let Ok(f) = value_str.parse::<f64>() {
+        if let Some(num) = serde_json::Number::from_f64(f) {
+            serde_json::Value::Number(num)
+        } else {
+            serde_json::Value::String(value_str.to_string())
+        }
+    } else if value_str == "true" {
+        serde_json::Value::Bool(true)
+    } else if value_str == "false" {
+        serde_json::Value::Bool(false)
+    } else if value_str == "null" {
+        serde_json::Value::Null
+    } else {
+        let s = if (value_str.starts_with('"') && value_str.ends_with('"')) ||
+                   (value_str.starts_with('\'') && value_str.ends_with('\'')) {
+            &value_str[1..value_str.len() - 1]
+        } else {
+            value_str
+        };
+        serde_json::Value::String(s.to_string())
+    };
+
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.is_empty() {
+        return Err("Empty path".to_string());
+    }
+
+    let mut current = json;
+    for (i, &part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            if !current.is_object() {
+                *current = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if let Some(map) = current.as_object_mut() {
+                map.insert(part.to_string(), json_val);
+                return Ok(());
+            } else {
+                return Err("Failed to convert value to object".to_string());
+            }
+        } else {
+            if !current.is_object() {
+                *current = serde_json::Value::Object(serde_json::Map::new());
+            }
+            let map = current.as_object_mut().unwrap();
+            if !map.contains_key(part) || !map.get(part).unwrap().is_object() {
+                map.insert(part.to_string(), serde_json::Value::Object(serde_json::Map::new()));
+            }
+            current = map.get_mut(part).unwrap();
+        }
+    }
+    Ok(())
 }
 
 // ─── Debug directory resolution ───────────────────────────────────────────────
@@ -1061,7 +1182,16 @@ fn main() {
     let spec_start = Instant::now();
     let spec_file = File::open(&args.spec_path).expect("Failed to open spec file");
     let reader = BufReader::new(spec_file);
-    let spec: RenderSpec = serde_json::from_reader(reader).expect("Failed to parse JSON");
+    let mut spec_value: serde_json::Value = serde_json::from_reader(reader).expect("Failed to parse JSON");
+    
+    for (path, val) in &args.overrides {
+        if let Err(e) = apply_override(&mut spec_value, path, val) {
+            eprintln!("Error applying override ({} = {}): {}", path, val, e);
+            std::process::exit(1);
+        }
+    }
+    
+    let spec: RenderSpec = serde_json::from_value(spec_value).expect("Failed to deserialize final spec with overrides");
     let spec_load_dur = spec_start.elapsed();
 
     info!("Initializing headless video rendering pipeline...");
