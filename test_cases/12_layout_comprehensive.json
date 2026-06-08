@@ -1,0 +1,379 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/12_layout_comprehensive.mp4",
+  "composition": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "duration": 8.0
+  },
+  "assets": {
+    "gt_canon": {
+      "type": "font",
+      "provider": "local",
+      "path": "fonts/GT-Canon-VF.ttf"
+    },
+    "gt_canon_italic": {
+      "type": "font",
+      "provider": "local",
+      "path": "fonts/GT-Canon-Italic-VF.ttf"
+    }
+  },
+  "tracks": [
+    {
+      "id": "layout_track",
+      "clips": [
+        {
+          "id": "layout_clip_1",
+          "type": "text",
+          "duration": 2.0,
+          "text_params": {
+            "kind": "layout",
+            "entrance": {
+              "type": "reveal",
+              "granularity": "letter",
+              "delay": 0.0,
+              "duration": 0.2,
+              "easing": "linear",
+              "start_transform": {
+                "opacity": 0.0
+              }
+            },
+            "body": {
+              "type": "vstack",
+              "spacing": 50.0,
+              "alignment": "center",
+              "padding": [100.0, 60.0, 100.0, 60.0],
+              "children": [
+                {
+                  "type": "text",
+                  "text": "VStack Alignment Focus",
+                  "font": "gt_canon",
+                  "font_size": 72.0,
+                  "color": [0.95, 0.9, 0.2, 1.0],
+                  "alignment": "center"
+                },
+                {
+                  "type": "spacer",
+                  "size": 60.0
+                },
+                {
+                  "type": "text",
+                  "text": "This vertical layout verifies padding at the edges, center alignment, and line wrapping for paragraphs. If wrapping works, this text will fit comfortably inside the 1080px width container without any clipping.",
+                  "font": "gt_canon_italic",
+                  "font_size": 44.0,
+                  "color": [1.0, 1.0, 1.0, 0.9],
+                  "alignment": "center"
+                },
+                {
+                  "type": "spacer"
+                },
+                {
+                  "type": "text",
+                  "text": "Footer Text",
+                  "font": "gt_canon",
+                  "font_size": 36.0,
+                  "color": [0.6, 0.6, 0.6, 1.0],
+                  "alignment": "center"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "layout_clip_2",
+          "type": "text",
+          "duration": 2.0,
+          "text_params": {
+            "kind": "layout",
+            "entrance": {
+              "type": "reveal",
+              "granularity": "letter",
+              "delay": 0.0,
+              "duration": 0.2,
+              "easing": "linear",
+              "start_transform": {
+                "opacity": 0.0
+              }
+            },
+            "body": {
+              "type": "vstack",
+              "spacing": 40.0,
+              "alignment": "center",
+              "padding": [80.0, 60.0, 80.0, 60.0],
+              "children": [
+                {
+                  "type": "text",
+                  "text": "HStack Spacing & Alignment",
+                  "font": "gt_canon",
+                  "font_size": 64.0,
+                  "color": [0.95, 0.9, 0.2, 1.0],
+                  "alignment": "center"
+                },
+                {
+                  "type": "spacer"
+                },
+                {
+                  "type": "hstack",
+                  "spacing": 30.0,
+                  "alignment": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "text": "Left Col",
+                      "font": "gt_canon_italic",
+                      "font_size": 48.0,
+                      "color": [1.0, 1.0, 1.0, 0.9],
+                      "alignment": "left"
+                    },
+                    {
+                      "type": "spacer",
+                      "size": 120.0
+                    },
+                    {
+                      "type": "text",
+                      "text": "Right Col",
+                      "font": "gt_canon_italic",
+                      "font_size": 48.0,
+                      "color": [0.3, 0.8, 1.0, 0.9],
+                      "alignment": "right"
+                    }
+                  ]
+                },
+                {
+                  "type": "spacer"
+                },
+                {
+                  "type": "hstack",
+                  "spacing": 20.0,
+                  "alignment": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "text": "A",
+                      "font": "gt_canon",
+                      "font_size": 40.0,
+                      "color": [1.0, 0.3, 0.3, 1.0]
+                    },
+                    {
+                      "type": "spacer"
+                    },
+                    {
+                      "type": "text",
+                      "text": "B",
+                      "font": "gt_canon",
+                      "font_size": 40.0,
+                      "color": [0.3, 1.0, 0.3, 1.0]
+                    },
+                    {
+                      "type": "spacer"
+                    },
+                    {
+                      "type": "text",
+                      "text": "C",
+                      "font": "gt_canon",
+                      "font_size": 40.0,
+                      "color": [0.3, 0.3, 1.0, 1.0]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "layout_clip_3",
+          "type": "text",
+          "duration": 2.0,
+          "text_params": {
+            "kind": "layout",
+            "entrance": {
+              "type": "reveal",
+              "granularity": "letter",
+              "delay": 0.0,
+              "duration": 0.2,
+              "easing": "linear",
+              "start_transform": {
+                "opacity": 0.0
+              }
+            },
+            "body": {
+              "type": "vstack",
+              "spacing": 40.0,
+              "alignment": "center",
+              "padding": [80.0, 60.0, 80.0, 60.0],
+              "children": [
+                {
+                  "type": "text",
+                  "text": "ZStack Layering Focus",
+                  "font": "gt_canon",
+                  "font_size": 64.0,
+                  "color": [0.95, 0.9, 0.2, 1.0],
+                  "alignment": "center"
+                },
+                {
+                  "type": "spacer"
+                },
+                {
+                  "type": "zstack",
+                  "alignment": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "text": "SHADOW EFFECT",
+                      "font": "gt_canon",
+                      "font_size": 88.0,
+                      "color": [0.3, 0.3, 0.3, 0.5],
+                      "alignment": "center"
+                    },
+                    {
+                      "type": "text",
+                      "text": "SHADOW EFFECT",
+                      "font": "gt_canon",
+                      "font_size": 88.0,
+                      "color": [1.0, 0.3, 0.3, 1.0],
+                      "alignment": "center",
+                      "axes": {
+                        "wght": 700.0
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "spacer"
+                },
+                {
+                  "type": "zstack",
+                  "alignment": "top_left",
+                  "children": [
+                    {
+                      "type": "text",
+                      "text": "Top-Left Overlay Info",
+                      "font": "gt_canon_italic",
+                      "font_size": 44.0,
+                      "color": [1.0, 1.0, 1.0, 0.95]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "layout_clip_4",
+          "type": "text",
+          "duration": 2.0,
+          "text_params": {
+            "kind": "layout",
+            "entrance": {
+              "type": "reveal",
+              "granularity": "letter",
+              "delay": 0.0,
+              "duration": 0.2,
+              "easing": "linear",
+              "start_transform": {
+                "opacity": 0.0
+              }
+            },
+            "body": {
+              "type": "vstack",
+              "spacing": 30.0,
+              "alignment": "center",
+              "padding": [100.0, 60.0, 100.0, 60.0],
+              "children": [
+                {
+                  "type": "text",
+                  "text": "Nested Layout Matrix",
+                  "font": "gt_canon",
+                  "font_size": 64.0,
+                  "color": [0.95, 0.9, 0.2, 1.0],
+                  "alignment": "center"
+                },
+                {
+                  "type": "spacer",
+                  "size": 40.0
+                },
+                {
+                  "type": "hstack",
+                  "spacing": 20.0,
+                  "alignment": "top",
+                  "children": [
+                    {
+                      "type": "vstack",
+                      "spacing": 20.0,
+                      "alignment": "left",
+                      "children": [
+                        {
+                          "type": "text",
+                          "text": "Item 1",
+                          "font": "gt_canon_italic",
+                          "font_size": 40.0,
+                          "color": [1.0, 1.0, 1.0, 1.0]
+                        },
+                        {
+                          "type": "text",
+                          "text": "Item 2",
+                          "font": "gt_canon_italic",
+                          "font_size": 40.0,
+                          "color": [1.0, 1.0, 1.0, 1.0]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "spacer"
+                    },
+                    {
+                      "type": "vstack",
+                      "spacing": 20.0,
+                      "alignment": "right",
+                      "children": [
+                        {
+                          "type": "text",
+                          "text": "Item A",
+                          "font": "gt_canon_italic",
+                          "font_size": 40.0,
+                          "color": [0.3, 0.8, 1.0, 1.0]
+                        },
+                        {
+                          "type": "text",
+                          "text": "Item B",
+                          "font": "gt_canon_italic",
+                          "font_size": 40.0,
+                          "color": [0.3, 0.8, 1.0, 1.0]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "spacer"
+                },
+                {
+                  "type": "text",
+                  "text": "Dynamic Weight:",
+                  "font": "gt_canon",
+                  "font_size": 48.0,
+                  "color": [1.0, 1.0, 1.0, 1.0],
+                  "alignment": "center"
+                },
+                {
+                  "type": "text",
+                  "text": "VARIABLE WEIGHT TEXT",
+                  "font": "gt_canon",
+                  "font_size": 56.0,
+                  "color": [1.0, 1.0, 1.0, 1.0],
+                  "alignment": "center",
+                  "axes": {
+                    "wght": {
+                      "expression": "300.0 + 400.0 * (0.5 + 0.5 * sin(clip_time * 3.14159))"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

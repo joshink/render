@@ -288,7 +288,32 @@ fn run_test_case(spec_name: &str) {
                 let diff_ratio = diff_count as f64 / (num_samples * 3.0);
                 assert!(diff_ratio < 0.01, "Text visible at end of exit transition or background mismatch (diff_ratio={:.4})", diff_ratio);
             }
+        } else if spec_name == "12_layout_comprehensive.json" {
+            let t = review.timestamp;
+            if (t - 3.0).abs() < 0.1 || (t - 5.0).abs() < 0.1 || (t - 7.0).abs() < 0.1 {
+                let t1_review = review_frames.iter().find(|r| (r.timestamp - 1.0).abs() < 0.1)
+                    .expect("Missing t=1.0 frame in review.json");
+                let t1_path = run_folder_path.join(&t1_review.file);
+                let t1_img = image::open(t1_path).expect("Failed to open t=1.0 frame image");
+
+                let mut diff_count = 0;
+                for y in (0..spec.composition.height).step_by(step_usize) {
+                    for x in (0..spec.composition.width).step_by(step_usize) {
+                        let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                        let t1_pixel = t1_img.get_pixel(x, y).to_rgba();
+                        for c in 0..3 {
+                            if (out_pixel[c] as i32 - t1_pixel[c] as i32).abs() > 5 {
+                                diff_count += 1;
+                            }
+                        }
+                    }
+                }
+                let diff_ratio = diff_count as f64 / (num_samples * 3.0);
+                println!("12_layout_comprehensive stage frame comparison (t={:.2} vs t=1.0): diff_ratio={:.4}", t, diff_ratio);
+                assert!(diff_ratio > 0.01, "Layout frame at t={:.2} is identical to t=1.0 (diff_ratio={:.4})", t, diff_ratio);
+            }
         }
+
 
 
         // Perform pixel checks
@@ -569,4 +594,10 @@ fn test_10_dynamic_transitions() {
 fn test_11_text_transitions() {
     run_test_case("11_text_transitions.json");
 }
+
+#[test]
+fn test_12_layout_comprehensive() {
+    run_test_case("12_layout_comprehensive.json");
+}
+
 

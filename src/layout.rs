@@ -362,9 +362,9 @@ impl ResolvedNode {
                         let metrics = font_ref.metrics(&coords);
                         let scale = *font_size / metrics.units_per_em as f32;
                         font_ascent = metrics.ascent * scale;
-                        // descent is negative in OpenType; subtract to get the
+                        // descent is positive in swash; add to get the
                         // full line-to-line distance.
-                        font_line_h = (metrics.ascent - metrics.descent + metrics.leading) * scale;
+                        font_line_h = (metrics.ascent + metrics.descent.abs() + metrics.leading) * scale;
                     }
                 }
                 *ascent = font_ascent;
@@ -1041,9 +1041,9 @@ fn measure_text(
     let glyph_metrics = font.glyph_metrics(&coords);
     let font_metrics = font.metrics(&coords);
     let scale_factor = font_size / font_metrics.units_per_em as f32;
-    // descent is negative in OpenType; subtract to get the full line height.
+    // descent is positive in swash; add to get the full line height.
     let line_height_px =
-        (font_metrics.ascent - font_metrics.descent + font_metrics.leading) * scale_factor;
+        (font_metrics.ascent + font_metrics.descent.abs() + font_metrics.leading) * scale_factor;
 
     // Pre-compute the space advance (constant for the entire text block)
     let space_gid = charmap.map(' ');
