@@ -47,6 +47,10 @@ pub struct SpotCheckMetadata {
     pub format: String,
 }
 
+// NOTE: EFFECTS_REGISTRY and TRANSITIONS_REGISTRY share structurally identical patterns for
+// registration and access. If a third registry type is introduced in the future, consider
+// extracting a generic Registry<T> type or using a macro to reduce boilerplate.
+
 static EFFECTS_REGISTRY: RwLock<Vec<EffectMetadata>> = RwLock::new(Vec::new());
 
 pub fn register_effect_metadata(meta: EffectMetadata) {
@@ -88,28 +92,18 @@ pub fn get_transitions_registry() -> Vec<TransitionMetadata> {
     TRANSITIONS_REGISTRY.read().map(|r| r.clone()).unwrap_or_default()
 }
 
+fn extract_tagged_block(wgsl: &str, tag: &str) -> Option<String> {
+    let content_start = wgsl.find(tag)? + tag.len();
+    let end = wgsl[content_start..].find("*/")?;
+    Some(wgsl[content_start..content_start + end].trim().to_string())
+}
+
 pub fn extract_transition_metadata(wgsl: &str) -> Option<String> {
-    let start_tag = "/* TRANSITION_METADATA:";
-    let end_tag = "*/";
-    if let Some(start_idx) = wgsl.find(start_tag) {
-        let content_start = start_idx + start_tag.len();
-        if let Some(end_idx) = wgsl[content_start..].find(end_tag) {
-            return Some(wgsl[content_start..content_start + end_idx].trim().to_string());
-        }
-    }
-    None
+    extract_tagged_block(wgsl, "/* TRANSITION_METADATA:")
 }
 
 pub fn extract_metadata(wgsl: &str) -> Option<String> {
-    let start_tag = "/* EFFECTS_METADATA:";
-    let end_tag = "*/";
-    if let Some(start_idx) = wgsl.find(start_tag) {
-        let content_start = start_idx + start_tag.len();
-        if let Some(end_idx) = wgsl[content_start..].find(end_tag) {
-            return Some(wgsl[content_start..content_start + end_idx].trim().to_string());
-        }
-    }
-    None
+    extract_tagged_block(wgsl, "/* EFFECTS_METADATA:")
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +206,7 @@ pub enum ClipType {
 }
 
 /// Porter-Duff / Photoshop-style blend mode applied when compositing a clip.
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlendMode {
     #[default] Normal,
@@ -222,7 +216,7 @@ pub enum BlendMode {
 }
 
 impl BlendMode {
-    pub fn as_u32(self) -> u32 { self as u32 }
+    pub fn as_u32(&self) -> u32 { *self as u32 }
 }
 
 /// A single visual clip on a track, carrying type-specific params, transform,
@@ -289,12 +283,12 @@ pub struct TextTransition {
     #[serde(rename = "type")]
     pub transition_type: String,
     #[serde(default = "default_granularity")]
-    pub granularity: String,
+    pub granularity: std::borrow::Cow<'static, str>,
     #[serde(default)]
     pub delay: f32,
     pub duration: f32,
     #[serde(default = "default_easing")]
-    pub easing: String,
+    pub easing: std::borrow::Cow<'static, str>,
     #[serde(default)]
     pub start_transform: Option<TextStartTransform>,
 }
@@ -311,12 +305,12 @@ pub struct TextStartTransform {
     pub opacity: Option<f32>,
 }
 
-fn default_granularity() -> String {
-    "letter".to_string()
+fn default_granularity() -> std::borrow::Cow<'static, str> {
+    std::borrow::Cow::Borrowed("letter")
 }
 
-fn default_easing() -> String {
-    "linear".to_string()
+fn default_easing() -> std::borrow::Cow<'static, str> {
+    std::borrow::Cow::Borrowed("linear")
 }
 
 
@@ -524,16 +518,12 @@ impl Track {
         let clip_starts = self.get_clip_start_times();
         let mut resolved = Vec::new();
         for tr in &self.transitions {
-            let start_time = if let Some(s) = tr.start {
-                s
-            } else {
-                if let Some(idx) = self.clips.iter().position(|c| c.id == tr.to) {
-                    let boundary = clip_starts[idx];
-                    boundary - tr.duration * 0.5
-                } else {
-                    0.0
-                }
-            };
+            let start_time = tr.start.unwrap_or_else(|| {
+                self.clips.iter()
+                    .position(|c| c.id == tr.to)
+                    .map(|idx| clip_starts[idx] - tr.duration * 0.5)
+                    .unwrap_or(0.0)
+            });
             resolved.push((tr.clone(), start_time));
         }
         resolved
@@ -551,7 +541,16 @@ impl AudioTrack {
 // ---------------------------------------------------------------------------
 
 /// Reads a named float parameter from an effect's params map, evaluating
-/// expressions and keyframes. Returns `default` if the key is absent.
+/// expressions and keyframes.
+///
+/// # Parameters
+/// * `effect` - The effect to query.
+/// * `key` - The parameter name.
+/// * `clip_time` - The current time relative to the clip start.
+/// * `duration` - The total duration of the clip.
+/// * `w` - The composition width.
+/// * `h` - The composition height.
+/// * `default` - The fallback value if parameter is missing.
 fn read_effect_float(effect: &Effect, key: &str, clip_time: f32, duration: f32, w: u32, h: u32, default: f32) -> f32 {
     effect.params.as_ref()
         .and_then(|map| map.get(key))
@@ -870,6 +869,29 @@ impl Clip {
 
     pub fn eval_shader_params(&self, clip_time: f32, comp_width: u32, comp_height: u32, time: f32) -> ShaderParams {
         eval_shader_params_from_effects(&self.effects, clip_time, self.duration, comp_width, comp_height, time)
+    }
+
+    pub fn eval_compositor_params(&self, clip_time: f32, spec: &RenderSpec) -> CompositorParams {
+        let position = self.eval_position(clip_time, spec.composition.width, spec.composition.height);
+        let scale = self.eval_scale(clip_time, spec.composition.width, spec.composition.height);
+        let rotation = self.eval_rotation(clip_time, spec.composition.width, spec.composition.height);
+        let opacity = self.eval_opacity(clip_time, spec.composition.width, spec.composition.height);
+        let blend_mode_u32 = self.blend_mode.as_ref().map(|b| b.as_u32()).unwrap_or(0);
+        let expanded_effects = spec.expand_effects(&self.effects, clip_time, self.duration, spec.composition.width, spec.composition.height, 0);
+        let (grayscale, brightness) = eval_built_in_effects_from_effects(&expanded_effects, clip_time, self.duration, spec.composition.width, spec.composition.height);
+
+        CompositorParams {
+            position,
+            scale,
+            rotation,
+            opacity,
+            clip_type: 0,
+            blend_mode: blend_mode_u32,
+            grayscale,
+            brightness,
+            _padding: [0, 0],
+            solid_color: [0.0, 0.0, 0.0, 1.0],
+        }
     }
 }
 
@@ -1215,17 +1237,17 @@ pub fn evaluate_padding(value: &serde_json::Value, clip_time: f32, duration: f32
     [p, p, p, p]
 }
 
-/// Evaluates a single math expression string via `evalexpr`
-/// with `time`,
-/// `clip_time`, `clip_duration`, `comp_width`, `comp_height`, and `pi` available as variables.
-/// Falls back to a plain `f32::parse` if the expression engine can't handle it.
-pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, width: u32, height: u32, default: f32) -> f32 {
-    // Replace dots only in recognized variable names to avoid mangling decimal literals.
-    let cleaned_expr = expr
-        .replace("comp.width", "comp_width")
-        .replace("comp.height", "comp_height")
-        .replace("clip.time", "clip_time")
-        .replace("clip.duration", "clip_duration");
+fn get_float_helper(val: &evalexpr::Value) -> Result<f64, evalexpr::EvalexprError> {
+    if let Ok(f) = val.as_float() {
+        Ok(f)
+    } else if let Ok(i) = val.as_int() {
+        Ok(i as f64)
+    } else {
+        Err(evalexpr::EvalexprError::expected_number(val.clone()))
+    }
+}
+
+fn build_eval_context(clip_time: f32, duration: f32, width: u32, height: u32) -> HashMapContext {
     let mut context = HashMapContext::new();
     let _ = context.set_value("time".into(), (clip_time as f64).into());
     let _ = context.set_value("clip_time".into(), (clip_time as f64).into());
@@ -1237,38 +1259,28 @@ pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, wid
         Ok(evalexpr::Value::Float(std::f64::consts::PI))
     }));
 
-    fn get_float(val: &evalexpr::Value) -> Result<f64, evalexpr::EvalexprError> {
-        if let Ok(f) = val.as_float() {
-            Ok(f)
-        } else if let Ok(i) = val.as_int() {
-            Ok(i as f64)
-        } else {
-            Err(evalexpr::EvalexprError::expected_number(val.clone()))
-        }
-    }
-
     let _ = context.set_function("sin".into(), evalexpr::Function::new(|argument| {
-        let val = get_float(argument)?;
+        let val = get_float_helper(argument)?;
         Ok(evalexpr::Value::Float(val.sin()))
     }));
 
     let _ = context.set_function("cos".into(), evalexpr::Function::new(|argument| {
-        let val = get_float(argument)?;
+        let val = get_float_helper(argument)?;
         Ok(evalexpr::Value::Float(val.cos()))
     }));
 
     let _ = context.set_function("tan".into(), evalexpr::Function::new(|argument| {
-        let val = get_float(argument)?;
+        let val = get_float_helper(argument)?;
         Ok(evalexpr::Value::Float(val.tan()))
     }));
 
     let _ = context.set_function("abs".into(), evalexpr::Function::new(|argument| {
-        let val = get_float(argument)?;
+        let val = get_float_helper(argument)?;
         Ok(evalexpr::Value::Float(val.abs()))
     }));
 
     let _ = context.set_function("sqrt".into(), evalexpr::Function::new(|argument| {
-        let val = get_float(argument)?;
+        let val = get_float_helper(argument)?;
         Ok(evalexpr::Value::Float(val.sqrt()))
     }));
 
@@ -1280,11 +1292,27 @@ pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, wid
                 tuple.len()
             )));
         }
-        let base = get_float(&tuple[0])?;
-        let exponent = get_float(&tuple[1])?;
+        let base = get_float_helper(&tuple[0])?;
+        let exponent = get_float_helper(&tuple[1])?;
         Ok(evalexpr::Value::Float(base.powf(exponent)))
     }));
 
+    context
+}
+
+/// Evaluates a single math expression string via `evalexpr`
+/// with `time`,
+/// `clip_time`, `clip_duration`, `comp_width`, `comp_height`, and `pi` available as variables.
+/// Falls back to a plain `f32::parse` if the expression engine can't handle it.
+pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, width: u32, height: u32, default: f32) -> f32 {
+    // Replace dots only in recognized variable names to avoid mangling decimal literals.
+    let cleaned_expr = expr
+        .replace("comp.width", "comp_width")
+        .replace("comp.height", "comp_height")
+        .replace("clip.time", "clip_time")
+        .replace("clip.duration", "clip_duration");
+
+    let context = build_eval_context(clip_time, duration, width, height);
     let eval_res = eval_with_context(&cleaned_expr, &context);
     match eval_res {
         Ok(evalexpr::Value::Float(result)) => return result as f32,

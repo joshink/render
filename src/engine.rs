@@ -4,7 +4,7 @@
 //! compute shaders (compositor, built-in effects, and custom user shaders),
 //! and reads the final pixel buffer back to the CPU for encoding.
 
-use crate::config::{RenderSpec, ClipType, CompositorParams, Clip, Effect, Transition};
+use crate::config::{RenderSpec, ClipType, Clip, Effect, Transition};
 use log::{error};
 
 /// GPU-side uniform block for custom effect shaders.
@@ -128,15 +128,13 @@ pub fn pack_custom_params(
             buffer.extend_from_slice(bytemuck::bytes_of(&f));
         }
     }
-    
-    let aligned_len = (buffer.len() + 15) & !15;
-    while buffer.len() < aligned_len {
-        buffer.push(0);
-    }
-    if buffer.is_empty() {
-        buffer.resize(16, 0);
-    }
+    align_uniform_buffer(&mut buffer);
     buffer
+}
+
+fn align_uniform_buffer(buf: &mut Vec<u8>) {
+    let aligned = (buf.len() + 15) & !15;
+    buf.resize(aligned.max(16), 0);
 }
 
 pub fn pack_effect_params(
@@ -165,41 +163,23 @@ pub fn pack_effect_params(
                     }
                 }
                 buffer.extend_from_slice(bytemuck::bytes_of(&has_map));
-            } else if param.param_type == "bool" {
-                let default_val = param.default;
-                let val_f32 = if let Some(ref map) = effect.params {
-                    if let Some(val) = map.get(&param.name) {
-                        crate::config::evaluate_float(val, clip_time, duration, width, height, default_val)
-                    } else {
-                        default_val
-                    }
-                } else {
-                    default_val
-                };
-                let val_i32 = if val_f32 > 0.5 { 1i32 } else { 0i32 };
-                buffer.extend_from_slice(bytemuck::bytes_of(&val_i32));
             } else {
                 let default_val = param.default;
-                let val_f32 = if let Some(ref map) = effect.params {
-                    if let Some(val) = map.get(&param.name) {
-                        crate::config::evaluate_float(val, clip_time, duration, width, height, default_val)
-                    } else {
-                        default_val
-                    }
+                let val_f32 = effect.params.as_ref()
+                    .and_then(|map| map.get(&param.name))
+                    .map(|val| crate::config::evaluate_float(val, clip_time, duration, width, height, default_val))
+                    .unwrap_or(default_val);
+
+                if param.param_type == "bool" {
+                    let val_i32 = if val_f32 > 0.5 { 1i32 } else { 0i32 };
+                    buffer.extend_from_slice(bytemuck::bytes_of(&val_i32));
                 } else {
-                    default_val
-                };
-                buffer.extend_from_slice(bytemuck::bytes_of(&val_f32));
+                    buffer.extend_from_slice(bytemuck::bytes_of(&val_f32));
+                }
             }
         }
 
-        let aligned_len = (buffer.len() + 15) & !15;
-        while buffer.len() < aligned_len {
-            buffer.push(0);
-        }
-        if buffer.is_empty() {
-            buffer.resize(16, 0);
-        }
+        align_uniform_buffer(&mut buffer);
         buffer
     } else {
         if let Some(ref p) = effect.params {
@@ -225,41 +205,21 @@ pub fn pack_transition_params(
 
         let mut buffer = Vec::new();
         for param in sorted_params {
+            let default_val = param.default;
+            let val_f32 = tr.params.as_ref()
+                .and_then(|map| map.get(&param.name))
+                .map(|val| crate::config::evaluate_float(val, progress * duration, duration, width, height, default_val))
+                .unwrap_or(default_val);
+
             if param.param_type == "bool" {
-                let default_val = param.default;
-                let val_f32 = if let Some(ref map) = tr.params {
-                    if let Some(val) = map.get(&param.name) {
-                        crate::config::evaluate_float(val, progress * duration, duration, width, height, default_val)
-                    } else {
-                        default_val
-                    }
-                } else {
-                    default_val
-                };
                 let val_i32 = if val_f32 > 0.5 { 1i32 } else { 0i32 };
                 buffer.extend_from_slice(bytemuck::bytes_of(&val_i32));
             } else {
-                let default_val = param.default;
-                let val_f32 = if let Some(ref map) = tr.params {
-                    if let Some(val) = map.get(&param.name) {
-                        crate::config::evaluate_float(val, progress * duration, duration, width, height, default_val)
-                    } else {
-                        default_val
-                    }
-                } else {
-                    default_val
-                };
                 buffer.extend_from_slice(bytemuck::bytes_of(&val_f32));
             }
         }
 
-        let aligned_len = (buffer.len() + 15) & !15;
-        while buffer.len() < aligned_len {
-            buffer.push(0);
-        }
-        if buffer.is_empty() {
-            buffer.resize(16, 0);
-        }
+        align_uniform_buffer(&mut buffer);
         buffer
     } else {
         if let Some(ref p) = tr.params {
@@ -341,6 +301,35 @@ pub struct RenderContext {
 
 
 impl RenderContext {
+    fn render_clip_to_texture<'a>(
+        &self,
+        clip: &Clip,
+        clip_time: f32,
+        spec: &RenderSpec,
+        time: f32,
+        input: &mut &'a wgpu::Texture,
+        output: &mut &'a wgpu::Texture,
+    ) {
+        match clip.clip_type {
+            ClipType::Media | ClipType::Solid => {
+                self.composite_media_clip(clip, clip_time, spec, input, output);
+            }
+            ClipType::Text => {
+                self.composite_text_clip(clip, clip_time, spec, input, output);
+            }
+            _ => {}
+        }
+        let expanded_effects = spec.expand_effects(&clip.effects, clip_time, clip.duration, spec.composition.width, spec.composition.height, 0);
+        self.dispatch_expanded_effects(
+            &expanded_effects,
+            time,
+            clip_time,
+            clip.duration,
+            spec,
+            input,
+            output,
+        );
+    }
     /// Renders a single frame of the composition at the given `time` (seconds).
     ///
     /// Walks every track bottom-to-top, composites active media/solid clips,
@@ -384,66 +373,13 @@ impl RenderContext {
                     let mut sub_input_a = &self.texture_c;
                     let mut sub_output_a = &self.texture_d;
                     self.copy_texture(current_input, sub_input_a);
-                    
-                    match from_clip.clip_type {
-                        ClipType::Media | ClipType::Solid => {
-                            self.composite_media_clip(
-                                from_clip, clip_time_a, spec,
-                                &mut sub_input_a, &mut sub_output_a,
-                            );
-                        }
-                        ClipType::Text => {
-                            self.composite_text_clip(
-                                from_clip, clip_time_a, spec,
-                                &mut sub_input_a, &mut sub_output_a,
-                            );
-                        }
-                        _ => {}
-                    }
-                    
-                    let expanded_effects_a = spec.expand_effects(&from_clip.effects, clip_time_a, from_clip.duration, spec.composition.width, spec.composition.height, 0);
-                    self.dispatch_expanded_effects(
-                        &expanded_effects_a,
-                        time,
-                        clip_time_a,
-                        from_clip.duration,
-                        spec,
-                        &mut sub_input_a,
-                        &mut sub_output_a,
-                    );
-                    
+                    self.render_clip_to_texture(from_clip, clip_time_a, spec, time, &mut sub_input_a, &mut sub_output_a);
                     self.copy_texture(sub_input_a, current_output);
                     
                     let mut sub_input_b = &self.texture_c;
                     let mut sub_output_b = &self.texture_d;
                     self.copy_texture(current_input, sub_input_b);
-                    
-                    match to_clip.clip_type {
-                        ClipType::Media | ClipType::Solid => {
-                            self.composite_media_clip(
-                                to_clip, clip_time_b, spec,
-                                &mut sub_input_b, &mut sub_output_b,
-                            );
-                        }
-                        ClipType::Text => {
-                            self.composite_text_clip(
-                                to_clip, clip_time_b, spec,
-                                &mut sub_input_b, &mut sub_output_b,
-                            );
-                        }
-                        _ => {}
-                    }
-                    
-                    let expanded_effects_b = spec.expand_effects(&to_clip.effects, clip_time_b, to_clip.duration, spec.composition.width, spec.composition.height, 0);
-                    self.dispatch_expanded_effects(
-                        &expanded_effects_b,
-                        time,
-                        clip_time_b,
-                        to_clip.duration,
-                        spec,
-                        &mut sub_input_b,
-                        &mut sub_output_b,
-                    );
+                    self.render_clip_to_texture(to_clip, clip_time_b, spec, time, &mut sub_input_b, &mut sub_output_b);
                     
                     let transition_dest = sub_output_b;
                     let progress = ((time - *start).max(0.0) / tr.duration).clamp(0.0, 1.0);
@@ -560,20 +496,14 @@ impl RenderContext {
         current_input: &mut &'a wgpu::Texture,
         current_output: &mut &'a wgpu::Texture,
     ) {
-        let position = clip.eval_position(clip_time, spec.composition.width, spec.composition.height);
-        let scale = clip.eval_scale(clip_time, spec.composition.width, spec.composition.height);
-        let rotation = clip.eval_rotation(clip_time, spec.composition.width, spec.composition.height);
-        let opacity = clip.eval_opacity(clip_time, spec.composition.width, spec.composition.height);
-        let blend_mode_u32 = clip.blend_mode.as_ref().map(|b| b.clone().as_u32()).unwrap_or(0);
-        let expanded_effects = spec.expand_effects(&clip.effects, clip_time, clip.duration, spec.composition.width, spec.composition.height, 0);
-        let (grayscale, brightness) = crate::config::eval_built_in_effects_from_effects(&expanded_effects, clip_time, clip.duration, spec.composition.width, spec.composition.height);
+        let mut comp_params = clip.eval_compositor_params(clip_time, spec);
 
         let media_texture_ref = clip.asset.as_ref()
             .and_then(|asset_id| self.gpu_textures.get(asset_id))
             .unwrap_or(&self.transparent_texture);
         let media_texture_view = create_default_view(media_texture_ref);
 
-        let mut final_scale = scale;
+        let mut final_scale = comp_params.scale;
         if clip.clip_type == ClipType::Media {
             let clip_width = media_texture_ref.width() as f32;
             let clip_height = media_texture_ref.height() as f32;
@@ -598,11 +528,11 @@ impl RenderContext {
                     [s, s]
                 }
             };
-            final_scale = [scale[0] * base_scale[0], scale[1] * base_scale[1]];
+            final_scale = [comp_params.scale[0] * base_scale[0], comp_params.scale[1] * base_scale[1]];
         } else if clip.clip_type == ClipType::Solid {
             let comp_width = spec.composition.width as f32;
             let comp_height = spec.composition.height as f32;
-            final_scale = [scale[0] * comp_width, scale[1] * comp_height];
+            final_scale = [comp_params.scale[0] * comp_width, comp_params.scale[1] * comp_height];
         }
 
         let (clip_type_u32, solid_color) = match clip.clip_type {
@@ -613,18 +543,10 @@ impl RenderContext {
             _ => (0u32, [0.0, 0.0, 0.0, 1.0]),
         };
 
-        let comp_params = CompositorParams {
-            position,
-            scale: final_scale,
-            rotation,
-            opacity,
-            clip_type: clip_type_u32,
-            blend_mode: blend_mode_u32,
-            grayscale,
-            brightness,
-            _padding: [0, 0],
-            solid_color,
-        };
+        comp_params.scale = final_scale;
+        comp_params.clip_type = clip_type_u32;
+        comp_params.solid_color = solid_color;
+
         self.queue.write_buffer(&self.compositor_params_buffer, 0, bytemuck::bytes_of(&comp_params));
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -721,7 +643,6 @@ impl RenderContext {
             );
             let entrance = text_params.entrance.as_ref();
             let exit = text_params.exit.as_ref();
-            println!("TRANSITION DEBUG: clip_time={}, duration={}, entrance={:?}, exit={:?}", clip_time, clip.duration, entrance, exit);
             resolved.rasterize(
                 &mut dest_img,
                 &self.font_assets,
@@ -747,28 +668,9 @@ impl RenderContext {
                 self.texture_size,
             );
 
-            let position = clip.eval_position(clip_time, spec.composition.width, spec.composition.height);
-            let scale = clip.eval_scale(clip_time, spec.composition.width, spec.composition.height);
-            let rotation = clip.eval_rotation(clip_time, spec.composition.width, spec.composition.height);
-            let opacity = clip.eval_opacity(clip_time, spec.composition.width, spec.composition.height);
-            let blend_mode_u32 = clip.blend_mode.as_ref().map(|b| b.clone().as_u32()).unwrap_or(0);
-            let expanded_effects = spec.expand_effects(&clip.effects, clip_time, clip.duration, spec.composition.width, spec.composition.height, 0);
-            let (grayscale, brightness) = crate::config::eval_built_in_effects_from_effects(&expanded_effects, clip_time, clip.duration, spec.composition.width, spec.composition.height);
-
             let media_texture_view = create_default_view(&self.text_scratch_texture);
+            let comp_params = clip.eval_compositor_params(clip_time, spec);
 
-            let comp_params = CompositorParams {
-                position,
-                scale,
-                rotation,
-                opacity,
-                clip_type: 0u32, // Media in compositor.wgsl
-                blend_mode: blend_mode_u32,
-                grayscale,
-                brightness,
-                _padding: [0, 0],
-                solid_color: [0.0, 0.0, 0.0, 1.0],
-            };
             self.queue.write_buffer(&self.compositor_params_buffer, 0, bytemuck::bytes_of(&comp_params));
 
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
