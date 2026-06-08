@@ -46,6 +46,8 @@ pub struct RenderContext {
     pub transparent_texture: wgpu::Texture,
     pub texture_a: wgpu::Texture,
     pub texture_b: wgpu::Texture,
+    pub feedback_texture_a: wgpu::Texture,
+    pub feedback_texture_b: wgpu::Texture,
     pub compositor_params_buffer: wgpu::Buffer,
     pub engine_params_buffer: wgpu::Buffer,
     pub custom_params_buffer: wgpu::Buffer,
@@ -245,14 +247,22 @@ impl RenderContext {
                             }
                         } else {
                             // Built-in effects.wgsl
-                            let (grayscale, brightness) = clip.eval_built_in_effects(clip_time, is_movie);
-
-                            let built_in_params = ShaderParams {
-                                grayscale,
-                                brightness,
-                                _padding: [0, 0],
-                            };
+                            let built_in_params = clip.eval_shader_params(clip_time, spec.composition.width, spec.composition.height, time, is_movie);
                             self.queue.write_buffer(&self.built_in_params_buffer, 0, bytemuck::bytes_of(&built_in_params));
+
+                            let depth_texture_ref = clip.get_depth_map_asset_id()
+                                .and_then(|asset_id| self.gpu_textures.get(&asset_id))
+                                .unwrap_or(&self.transparent_texture);
+                            let depth_view = depth_texture_ref.create_view(&wgpu::TextureViewDescriptor::default());
+
+                            let frame_idx = (time * spec.composition.fps as f32).round() as u32;
+                            let (feedback_in, feedback_out) = if frame_idx % 2 == 0 {
+                                (&self.feedback_texture_a, &self.feedback_texture_b)
+                            } else {
+                                (&self.feedback_texture_b, &self.feedback_texture_a)
+                            };
+                            let feedback_in_view = feedback_in.create_view(&wgpu::TextureViewDescriptor::default());
+                            let feedback_out_view = feedback_out.create_view(&wgpu::TextureViewDescriptor::default());
 
                             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                                 label: Some("Built-in Effect Bind Group"),
@@ -269,6 +279,18 @@ impl RenderContext {
                                     wgpu::BindGroupEntry {
                                         binding: 2,
                                         resource: self.built_in_params_buffer.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 3,
+                                        resource: wgpu::BindingResource::TextureView(&depth_view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 4,
+                                        resource: wgpu::BindingResource::TextureView(&feedback_in_view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 5,
+                                        resource: wgpu::BindingResource::TextureView(&feedback_out_view),
                                     },
                                 ],
                             });

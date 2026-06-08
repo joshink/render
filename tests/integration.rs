@@ -103,9 +103,15 @@ fn run_test_case(spec_name: &str) {
     let is_effect_layer = spec_name == "11_effect_layer.json";
     let is_transform_keyframe = spec_name == "12_transform_keyframe.json";
     let is_custom_shader_effect = spec_name == "13_custom_shader_effect.json";
+    let is_hsl_adjust = spec_name == "14_hsl_adjust.json";
+    let is_blur_glow = spec_name == "15_blur_glow.json";
+    let is_film_effects = spec_name == "16_film_effects.json";
+    let is_depth_blur = spec_name == "17_depth_blur.json";
+    let is_fluid_flow = spec_name == "18_fluid_flow.json";
 
     let is_identity = !static_grayscale && !static_dim && !static_bright
-        && !is_blend_modes && !is_effect_layer && !is_transform_keyframe && !is_custom_shader_effect;
+        && !is_blend_modes && !is_effect_layer && !is_transform_keyframe && !is_custom_shader_effect
+        && !is_hsl_adjust && !is_blur_glow && !is_film_effects && !is_depth_blur && !is_fluid_flow;
 
     // Assertions for each frame in review.json
     for review in &review_frames {
@@ -243,6 +249,108 @@ fn run_test_case(spec_name: &str) {
             let total_sampled_channels = num_samples * 3.0;
             let diff_ratio = diff_count as f64 / total_sampled_channels;
             assert!(diff_ratio > 0.05, "Frame {} did not have custom wave effect applied (diff_ratio={:.4} <= 0.05)", review.frame, diff_ratio);
+        } else if is_hsl_adjust {
+            let mut diff_count = 0;
+            for y in (0..spec.composition.height).step_by(step_usize) {
+                for x in (0..spec.composition.width).step_by(step_usize) {
+                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+                    for c in 0..3 {
+                        if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 10 {
+                            diff_count += 1;
+                        }
+                    }
+                }
+            }
+            let total_sampled_channels = num_samples * 3.0;
+            let diff_ratio = diff_count as f64 / total_sampled_channels;
+            assert!(diff_ratio > 0.1, "Frame {} did not have HSL adjustment applied (diff_ratio={:.4} <= 0.1)", review.frame, diff_ratio);
+        } else if is_blur_glow {
+            let mut diff_count = 0;
+            for y in (0..spec.composition.height).step_by(step_usize) {
+                for x in (0..spec.composition.width).step_by(step_usize) {
+                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+                    for c in 0..3 {
+                        if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 5 {
+                            diff_count += 1;
+                        }
+                    }
+                }
+            }
+            let total_sampled_channels = num_samples * 3.0;
+            let diff_ratio = diff_count as f64 / total_sampled_channels;
+            assert!(diff_ratio > 0.1, "Frame {} did not have Blur/Glow applied (diff_ratio={:.4} <= 0.1)", review.frame, diff_ratio);
+        } else if is_film_effects {
+            let mut diff_count = 0;
+            for y in (0..spec.composition.height).step_by(step_usize) {
+                for x in (0..spec.composition.width).step_by(step_usize) {
+                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+                    for c in 0..3 {
+                        if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 2 {
+                            diff_count += 1;
+                        }
+                    }
+                }
+            }
+            let total_sampled_channels = num_samples * 3.0;
+            let diff_ratio = diff_count as f64 / total_sampled_channels;
+            assert!(diff_ratio > 0.05, "Frame {} did not have film grain noise applied (diff_ratio={:.4} <= 0.05)", review.frame, diff_ratio);
+        } else if is_depth_blur {
+            let cx = spec.composition.width as i32 / 2;
+            let cy = spec.composition.height as i32 / 2;
+            let mut center_diff = 0.0;
+            let mut edge_diff = 0.0;
+            let mut center_count = 0.0;
+            let mut edge_count = 0.0;
+            
+            for y in (0..spec.composition.height).step_by(step_usize) {
+                for x in (0..spec.composition.width).step_by(step_usize) {
+                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+                    let dx = x as i32 - cx;
+                    let dy = y as i32 - cy;
+                    let dist = ((dx * dx + dy * dy) as f64).sqrt();
+                    let normalized_dist = dist / (cx as f64);
+                    
+                    let mut diff = 0.0;
+                    for c in 0..3 {
+                        diff += (out_pixel[c] as f32 - in_pixel[c] as f32).abs() as f64;
+                    }
+                    diff /= 3.0;
+                    
+                    if normalized_dist < 0.25 {
+                        center_diff += diff;
+                        center_count += 1.0;
+                    } else if normalized_dist > 0.6 {
+                        edge_diff += diff;
+                        edge_count += 1.0;
+                    }
+                }
+            }
+            
+            let avg_center_diff = center_diff / center_count;
+            let avg_edge_diff = edge_diff / edge_count;
+            println!("Depth blur: Avg center diff = {:.2}, Avg edge diff = {:.2}", avg_center_diff, avg_edge_diff);
+            assert!(avg_center_diff < 5.0, "Center of depth blur is too blurry! diff={:.2}", avg_center_diff);
+            assert!(avg_edge_diff > 10.0, "Edges of depth blur are not blurred enough! diff={:.2}", avg_edge_diff);
+        } else if is_fluid_flow {
+            let mut diff_count = 0;
+            for y in (0..spec.composition.height).step_by(step_usize) {
+                for x in (0..spec.composition.width).step_by(step_usize) {
+                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+                    for c in 0..3 {
+                        if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 3 {
+                            diff_count += 1;
+                        }
+                    }
+                }
+            }
+            let total_sampled_channels = num_samples * 3.0;
+            let diff_ratio = diff_count as f64 / total_sampled_channels;
+            assert!(diff_ratio > 0.05, "Frame {} did not have fluid flow displacement applied (diff_ratio={:.4} <= 0.05)", review.frame, diff_ratio);
         }
     }
 }
@@ -329,3 +437,29 @@ fn test_12_transform_keyframe() {
 fn test_13_custom_shader_effect() {
     run_test_case("13_custom_shader_effect.json");
 }
+
+#[test]
+fn test_14_hsl_adjust() {
+    run_test_case("14_hsl_adjust.json");
+}
+
+#[test]
+fn test_15_blur_glow() {
+    run_test_case("15_blur_glow.json");
+}
+
+#[test]
+fn test_16_film_effects() {
+    run_test_case("16_film_effects.json");
+}
+
+#[test]
+fn test_17_depth_blur() {
+    run_test_case("17_depth_blur.json");
+}
+
+#[test]
+fn test_18_fluid_flow() {
+    run_test_case("18_fluid_flow.json");
+}
+

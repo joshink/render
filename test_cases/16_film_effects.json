@@ -1,0 +1,55 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/16_film_effects.png",
+  "composition": {
+    "width": 800,
+    "height": 800,
+    "fps": 30,
+    "duration": 2.0
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    }
+  },
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "input_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 2.0
+        }
+      ]
+    },
+    {
+      "id": "effect_track",
+      "clips": [
+        {
+          "id": "film_effect",
+          "type": "effect",
+          "duration": 2.0,
+          "effects": [
+            {
+              "type": "film_grain",
+              "params": {
+                "amount": 0.12,
+                "speed": 1.5
+              }
+            },
+            {
+              "type": "film_flicker",
+              "params": {
+                "amount": 0.15,
+                "speed": 2.0
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

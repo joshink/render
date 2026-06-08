@@ -160,10 +160,42 @@ pub struct Transition {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShaderParams {
-    pub grayscale: u32,
-    pub brightness: f32,
+    // Basic settings
+    pub grayscale_enabled: u32,
+    pub brightness_factor: f32,
+    pub contrast_factor: f32,
+    pub saturation_factor: f32,
+    
+    pub hue_rotate_angle: f32,
+    pub blur_radius: f32,
+    pub glow_intensity: f32,
+    pub glow_radius: f32,
+    
+    pub glow_threshold: f32,
+    pub film_grain_amount: f32,
+    pub film_grain_speed: f32,
+    pub film_flicker_amount: f32,
+    
+    pub film_flicker_speed: f32,
+    pub depth_blur_focus_x: f32,
+    pub depth_blur_focus_y: f32,
+    pub depth_blur_focus_radius: f32,
+    
+    pub depth_blur_near_blur: f32,
+    pub depth_blur_far_blur: f32,
+    pub depth_blur_use_map: u32,
+    pub flow_amount: f32,
+    
+    pub flow_speed: f32,
+    pub flow_decay: f32,
+    pub time: f32,
+    pub clip_time: f32,
+    
+    pub width: u32,
+    pub height: u32,
     pub _padding: [u32; 2],
 }
+
 
 /// GPU layout for compositor shader uniforms.
 #[repr(C)]
@@ -370,6 +402,182 @@ impl Clip {
             }
         }
         (grayscale, brightness)
+    }
+
+    pub fn get_depth_map_asset_id(&self) -> Option<String> {
+        for effect in &self.effects {
+            if effect.effect_type == "depth_blur" {
+                if let Some(ref params) = effect.params {
+                    if let Some(val) = params.get("depth_map") {
+                        if let Some(s) = val.as_str() {
+                            return Some(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn eval_shader_params(&self, clip_time: f32, comp_width: u32, comp_height: u32, time: f32, is_movie: bool) -> ShaderParams {
+        let mut params = ShaderParams {
+            grayscale_enabled: 0,
+            brightness_factor: 1.0,
+            contrast_factor: 1.0,
+            saturation_factor: 1.0,
+            hue_rotate_angle: 0.0,
+            blur_radius: 0.0,
+            glow_intensity: 0.0,
+            glow_radius: 0.0,
+            glow_threshold: 0.5,
+            film_grain_amount: 0.0,
+            film_grain_speed: 1.0,
+            film_flicker_amount: 0.0,
+            film_flicker_speed: 1.0,
+            depth_blur_focus_x: 0.5,
+            depth_blur_focus_y: 0.5,
+            depth_blur_focus_radius: 0.2,
+            depth_blur_near_blur: 0.0,
+            depth_blur_far_blur: 0.0,
+            depth_blur_use_map: 0,
+            flow_amount: 0.0,
+            flow_speed: 1.0,
+            flow_decay: 0.95,
+            time,
+            clip_time,
+            width: comp_width,
+            height: comp_height,
+            _padding: [0, 0],
+        };
+
+        for effect in &self.effects {
+            match effect.effect_type.as_str() {
+                "grayscale" => {
+                    let mut enabled = true;
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("enabled") {
+                            enabled = evaluate_float(val, clip_time, comp_width, comp_height, 1.0) > 0.5;
+                        }
+                    }
+                    if is_movie {
+                        enabled = enabled && (clip_time * std::f32::consts::PI).sin() > 0.0;
+                    }
+                    params.grayscale_enabled = if enabled { 1 } else { 0 };
+                }
+                "brightness" => {
+                    let mut factor = 1.0;
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("factor") {
+                            factor = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
+                        }
+                    }
+                    if is_movie {
+                        factor = factor * (1.0 + 0.8 * (clip_time * 2.0 * std::f32::consts::PI).sin());
+                    }
+                    params.brightness_factor = factor;
+                }
+                "contrast" => {
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("factor") {
+                            params.contrast_factor = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
+                        }
+                    }
+                }
+                "saturation" => {
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("factor") {
+                            params.saturation_factor = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
+                        }
+                    }
+                }
+                "hue_rotate" => {
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("angle") {
+                            params.hue_rotate_angle = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
+                        }
+                    }
+                }
+                "blur" => {
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("radius") {
+                            params.blur_radius = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
+                        }
+                    }
+                }
+                "glow" => {
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("intensity") {
+                            params.glow_intensity = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
+                        }
+                        if let Some(val) = map.get("radius") {
+                            params.glow_radius = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
+                        }
+                        if let Some(val) = map.get("threshold") {
+                            params.glow_threshold = evaluate_float(val, clip_time, comp_width, comp_height, 0.5);
+                        }
+                    }
+                }
+                "film_grain" => {
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("amount") {
+                            params.film_grain_amount = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
+                        }
+                        if let Some(val) = map.get("speed") {
+                            params.film_grain_speed = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
+                        }
+                    }
+                }
+                "film_flicker" => {
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("amount") {
+                            params.film_flicker_amount = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
+                        }
+                        if let Some(val) = map.get("speed") {
+                            params.film_flicker_speed = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
+                        }
+                    }
+                }
+                "depth_blur" => {
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("focus_x") {
+                            params.depth_blur_focus_x = evaluate_float(val, clip_time, comp_width, comp_height, 0.5);
+                        }
+                        if let Some(val) = map.get("focus_y") {
+                            params.depth_blur_focus_y = evaluate_float(val, clip_time, comp_width, comp_height, 0.5);
+                        }
+                        if let Some(val) = map.get("focus_radius") {
+                            params.depth_blur_focus_radius = evaluate_float(val, clip_time, comp_width, comp_height, 0.2);
+                        }
+                        if let Some(val) = map.get("near_blur") {
+                            params.depth_blur_near_blur = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
+                        }
+                        if let Some(val) = map.get("far_blur") {
+                            params.depth_blur_far_blur = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
+                        }
+                        if let Some(val) = map.get("depth_map") {
+                            if val.as_str().is_some() {
+                                params.depth_blur_use_map = 1;
+                            }
+                        }
+                    }
+                }
+                "flow" => {
+                    if let Some(ref map) = effect.params {
+                        if let Some(val) = map.get("amount") {
+                            params.flow_amount = evaluate_float(val, clip_time, comp_width, comp_height, 0.0);
+                        }
+                        if let Some(val) = map.get("speed") {
+                            params.flow_speed = evaluate_float(val, clip_time, comp_width, comp_height, 1.0);
+                        }
+                        if let Some(val) = map.get("decay") {
+                            params.flow_decay = evaluate_float(val, clip_time, comp_width, comp_height, 0.95);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        params
     }
 }
 
