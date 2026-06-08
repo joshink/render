@@ -193,6 +193,11 @@ pub struct AudioClip {
     pub duration: f32,
     #[serde(default)]
     pub offset: f32,
+    /// Source-audio in-point in seconds. The engine plays
+    /// `[trim_start, trim_start + duration]` of the asset; defaults to 0
+    /// (play from the start of the source).
+    #[serde(default)]
+    pub trim_start: f32,
 }
 
 /// Discriminant for the kind of content a clip renders.
@@ -703,7 +708,7 @@ impl RenderSpec {
         None
     }
 
-    pub fn get_audio_clips(&self) -> Vec<(String, f32, f32)> {
+    pub fn get_audio_clips(&self) -> Vec<(String, f32, f32, f32)> {
         let mut list = Vec::new();
         if let Some(ref tracks) = self.audio_tracks {
             for track in tracks {
@@ -713,10 +718,10 @@ impl RenderSpec {
                     if let Some(asset) = self.assets.get(&clip.asset) {
                         match asset {
                             Asset::Audio { path } => {
-                                list.push((path.clone(), absolute_start, clip.duration));
+                                list.push((path.clone(), absolute_start, clip.duration, clip.trim_start));
                             }
                             Asset::Video { path } => {
-                                list.push((path.clone(), absolute_start, clip.duration));
+                                list.push((path.clone(), absolute_start, clip.duration, clip.trim_start));
                             }
                             _ => {}
                         }

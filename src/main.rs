@@ -302,6 +302,58 @@ fn init_gpu() -> (wgpu::Device, wgpu::Queue, String) {
 
 // ─── Asset loading ────────────────────────────────────────────────────────────
 
+/// Fetches a remote URL using curl and caches it locally under target/cache.
+/// Returns the path to the local cached file.
+fn fetch_remote_url(url: &str) -> Result<String, String> {
+    let cache_dir = std::path::Path::new("target/cache");
+    if !cache_dir.exists() {
+        std::fs::create_dir_all(cache_dir)
+            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+    }
+
+    let hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        url.hash(&mut hasher);
+        hasher.finish()
+    };
+
+    // Strip query parameters to find clean extension
+    let clean_url_path = url.split('?').next().unwrap_or(url);
+    let extension = std::path::Path::new(clean_url_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("bin");
+
+    let cache_path = cache_dir.join(format!("{}.{}", hash, extension));
+
+    if cache_path.exists() {
+        info!("Cache hit for remote URL: {} -> {:?}", url, cache_path);
+        return Ok(cache_path.to_string_lossy().to_string());
+    }
+
+    info!("Cache miss, downloading remote URL: {} -> {:?}", url, cache_path);
+
+    let status = Command::new("curl")
+        .arg("-L") // follow redirects
+        .arg("-s") // silent
+        .arg("-f") // fail on server errors
+        .arg("-o")
+        .arg(&cache_path)
+        .arg(url)
+        .status()
+        .map_err(|e| format!("Failed to run curl: {}", e))?;
+
+    if !status.success() {
+        return Err(format!("curl download failed for URL {} with status {:?}", url, status));
+    }
+
+    Ok(cache_path.to_string_lossy().to_string())
+}
+
+
+
 /// Loads all image/video assets from the spec, resizes them to the composition
 /// size, and returns them as an RGBA hashmap keyed by asset ID.
 fn load_asset_images(spec: &RenderSpec) -> HashMap<String, image::RgbaImage> {
@@ -327,7 +379,7 @@ fn load_asset_images(spec: &RenderSpec) -> HashMap<String, image::RgbaImage> {
 /// optional audio mixing via `-filter_complex`.
 fn build_ffmpeg_args(
     spec: &RenderSpec,
-    audio_clips: &[(String, f32, f32)],
+    audio_clips: &[(String, f32, f32, f32)],
 ) -> Vec<String> {
     let mut ffmpeg_args = vec![
         "-y".to_string(),
@@ -344,26 +396,29 @@ fn build_ffmpeg_args(
     ];
 
     if !audio_clips.is_empty() {
-        for (path, _, _) in audio_clips {
+        for (path, _, _, _) in audio_clips {
             ffmpeg_args.push("-i".to_string());
             ffmpeg_args.push(path.clone());
         }
 
+        // Each clip plays [trim_start, trim_start + duration] of its source, then
+        // asetpts re-bases the trimmed segment to PTS 0 so adelay positions it at
+        // its absolute timeline start regardless of where it was cut from.
         let mut filter_complex = String::new();
         if audio_clips.len() == 1 {
-            let (_, start, duration) = audio_clips[0];
+            let (_, start, duration, trim_start) = audio_clips[0];
             let start_ms = (start * 1000.0).round() as u32;
             filter_complex = format!(
-                "[1:a]atrim=0:{:.3},adelay={}|{}[aout]",
-                duration, start_ms, start_ms
+                "[1:a]atrim={:.3}:{:.3},asetpts=PTS-STARTPTS,adelay={}|{}[aout]",
+                trim_start, trim_start + duration, start_ms, start_ms
             );
         } else {
-            for (idx, (_, start, duration)) in audio_clips.iter().enumerate() {
+            for (idx, (_, start, duration, trim_start)) in audio_clips.iter().enumerate() {
                 let input_idx = idx + 1; // 0 is video stdin
                 let start_ms = (start * 1000.0).round() as u32;
                 filter_complex.push_str(&format!(
-                    "[{}:a]atrim=0:{:.3},adelay={}|{}[a{}];",
-                    input_idx, duration, start_ms, start_ms, input_idx
+                    "[{}:a]atrim={:.3}:{:.3},asetpts=PTS-STARTPTS,adelay={}|{}[a{}];",
+                    input_idx, trim_start, trim_start + duration, start_ms, start_ms, input_idx
                 ));
             }
             for idx in 0..audio_clips.len() {
@@ -1191,8 +1246,59 @@ fn main() {
         }
     }
     
-    let spec: RenderSpec = serde_json::from_value(spec_value).expect("Failed to deserialize final spec with overrides");
+    let mut spec: RenderSpec = serde_json::from_value(spec_value).expect("Failed to deserialize final spec with overrides");
     let spec_load_dur = spec_start.elapsed();
+
+    // ── Download and cache remote assets ────────────────────────────────
+    for (asset_id, asset) in &mut spec.assets {
+        match asset {
+            Asset::Video { path } => {
+                if path.starts_with("http://") || path.starts_with("https://") {
+                    info!("Fetching remote Video asset '{}' from URL: {}", asset_id, path);
+                    *path = fetch_remote_url(path).unwrap_or_else(|e| {
+                        error!("Failed to fetch remote Video asset '{}': {}", asset_id, e);
+                        panic!("Failed to fetch remote Video asset '{}': {}", asset_id, e);
+                    });
+                }
+            }
+            Asset::Image { path } => {
+                if path.starts_with("http://") || path.starts_with("https://") {
+                    info!("Fetching remote Image asset '{}' from URL: {}", asset_id, path);
+                    *path = fetch_remote_url(path).unwrap_or_else(|e| {
+                        error!("Failed to fetch remote Image asset '{}': {}", asset_id, e);
+                        panic!("Failed to fetch remote Image asset '{}': {}", asset_id, e);
+                    });
+                }
+            }
+            Asset::Audio { path } => {
+                if path.starts_with("http://") || path.starts_with("https://") {
+                    info!("Fetching remote Audio asset '{}' from URL: {}", asset_id, path);
+                    *path = fetch_remote_url(path).unwrap_or_else(|e| {
+                        error!("Failed to fetch remote Audio asset '{}': {}", asset_id, e);
+                        panic!("Failed to fetch remote Audio asset '{}': {}", asset_id, e);
+                    });
+                }
+            }
+            Asset::Shader { path } => {
+                if path.starts_with("http://") || path.starts_with("https://") {
+                    info!("Fetching remote Shader asset '{}' from URL: {}", asset_id, path);
+                    *path = fetch_remote_url(path).unwrap_or_else(|e| {
+                        error!("Failed to fetch remote Shader asset '{}': {}", asset_id, e);
+                        panic!("Failed to fetch remote Shader asset '{}': {}", asset_id, e);
+                    });
+                }
+            }
+            Asset::Font { path, .. } => {
+                if path.starts_with("http://") || path.starts_with("https://") {
+                    info!("Fetching remote Font asset '{}' from URL: {}", asset_id, path);
+                    *path = fetch_remote_url(path).unwrap_or_else(|e| {
+                        error!("Failed to fetch remote Font asset '{}': {}", asset_id, e);
+                        panic!("Failed to fetch remote Font asset '{}': {}", asset_id, e);
+                    });
+                }
+            }
+        }
+    }
 
     info!("Initializing headless video rendering pipeline...");
     info!("Composition size: {}x{}", spec.composition.width, spec.composition.height);

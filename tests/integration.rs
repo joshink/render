@@ -5,6 +5,44 @@ use serde::Deserialize;
 
 use render_poc::config::{RenderSpec, ClipType};
 
+fn fetch_remote_url(url: &str) -> String {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return url.to_string();
+    }
+    let cache_dir = Path::new("target/cache");
+    if !cache_dir.exists() {
+        std::fs::create_dir_all(cache_dir).expect("Failed to create cache dir");
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&url, &mut hasher);
+    use std::hash::Hasher;
+    let hash = hasher.finish();
+
+    let clean_url_path = url.split('?').next().unwrap_or(url);
+    let extension = Path::new(clean_url_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("bin");
+
+    let cache_path = cache_dir.join(format!("{}.{}", hash, extension));
+    if cache_path.exists() {
+        return cache_path.to_string_lossy().to_string();
+    }
+
+    let status = Command::new("curl")
+        .arg("-L")
+        .arg("-s")
+        .arg("-f")
+        .arg("-o")
+        .arg(&cache_path)
+        .arg(url)
+        .status()
+        .expect("Failed to execute curl");
+
+    assert!(status.success(), "Failed to download remote test URL: {}", url);
+    cache_path.to_string_lossy().to_string()
+}
+
 fn run_test_case(spec_name: &str) {
     let spec_path = format!("test_cases/{}", spec_name);
     let binary_path = env!("CARGO_BIN_EXE_render-poc");
@@ -63,7 +101,10 @@ fn run_test_case(spec_name: &str) {
     assert!(!review_frames.is_empty(), "review.json is empty");
 
     // Load input image and resize to match spec composition
-    let in_resized = if let Some(input_path) = spec.get_input_path() {
+    let in_resized = if let Some(mut input_path) = spec.get_input_path() {
+        if input_path.starts_with("http://") || input_path.starts_with("https://") {
+            input_path = fetch_remote_url(&input_path);
+        }
         let in_img = image::open(&input_path).expect("Failed to open input image");
         in_img.resize_exact(spec.composition.width, spec.composition.height, image::imageops::FilterType::Nearest)
     } else {
@@ -598,6 +639,29 @@ fn test_11_text_transitions() {
 #[test]
 fn test_12_layout_comprehensive() {
     run_test_case("12_layout_comprehensive.json");
+}
+
+#[test]
+fn test_13_remote_assets() {
+    run_test_case("13_remote_assets.json");
+    
+    // Verify audio stream presence using ffprobe
+    let output_path = Path::new("test_cases/outputs/13_remote_assets.mp4");
+    let ffprobe_status = Command::new("ffprobe")
+        .args(&[
+            "-v", "error",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            output_path.to_str().unwrap(),
+        ])
+        .output();
+    if let Ok(output) = ffprobe_status {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("audio"), "Output MP4 does not contain an audio stream! Streams: {}", stdout);
+        println!("ffprobe verified audio stream exists: {}", stdout.trim());
+    } else {
+        panic!("Failed to run ffprobe to verify audio");
+    }
 }
 
 
