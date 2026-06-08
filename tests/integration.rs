@@ -81,6 +81,11 @@ fn run_test_case(spec_name: &str) {
         assert_eq!(out_img.width(), spec.composition.width, "Debug frame width mismatch");
         assert_eq!(out_img.height(), spec.composition.height, "Debug frame height mismatch");
 
+        let step_usize = 5usize;
+        let step_u32 = step_usize as u32;
+        let num_samples = (((spec.composition.height + step_u32 - 1) / step_u32) * ((spec.composition.width + step_u32 - 1) / step_u32)) as f64;
+
+
         // Determine active properties for this frame
         let mut check_grayscale = None;
         let mut check_dim = None;
@@ -212,14 +217,85 @@ fn run_test_case(spec_name: &str) {
                 let pixel = out_img.get_pixel(400, 400).to_rgba();
                 assert!(pixel[0] > 100 && (pixel[0] as i32 - pixel[1] as i32).abs() < 20, "Slide switch not settled on white/grey: {:?}", pixel);
             }
+        } else if spec_name == "11_text_transitions.json" {
+            let t = review.timestamp;
+            if t < 0.05 {
+                // Entrance starting: no text should be visible yet.
+            } else if (t - 1.5).abs() < 0.1 {
+                // Midpoint of clip: text is fully visible.
+                let t0_review = review_frames.iter().find(|r| r.timestamp < 0.05)
+                    .expect("Missing t=0.0 frame in review.json");
+                let t0_path = run_folder_path.join(&t0_review.file);
+                let t0_img = image::open(t0_path).expect("Failed to open t=0.0 frame image");
+
+                let mut diff_count = 0;
+                let mut has_yellow_diff = false;
+                let mut has_white_diff = false;
+
+                for y in (0..spec.composition.height).step_by(step_usize) {
+                    for x in (0..spec.composition.width).step_by(step_usize) {
+                        let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                        let t0_pixel = t0_img.get_pixel(x, y).to_rgba();
+
+                        let r_diff = (out_pixel[0] as i32 - t0_pixel[0] as i32).abs();
+                        let g_diff = (out_pixel[1] as i32 - t0_pixel[1] as i32).abs();
+                        let b_diff = (out_pixel[2] as i32 - t0_pixel[2] as i32).abs();
+
+                        if r_diff > 10 || g_diff > 10 || b_diff > 10 {
+                            diff_count += 1;
+
+                            let r = out_pixel[0];
+                            let g = out_pixel[1];
+                            let b = out_pixel[2];
+
+                            // Yellow/gold text color: [1.0, 0.9, 0.1]
+                            if r > 200 && g > 180 && b < 100 {
+                                has_yellow_diff = true;
+                            }
+                            // White text color: [1.0, 1.0, 1.0]
+                            if r > 220 && g > 220 && b > 220 {
+                                has_white_diff = true;
+                            }
+                        }
+                    }
+                }
+
+                let diff_ratio = diff_count as f64 / num_samples;
+                println!("t=1.5 text transition comparison: diff_ratio={:.4}, has_yellow={}, has_white={}", diff_ratio, has_yellow_diff, has_white_diff);
+
+                assert!(diff_ratio > 0.01 && diff_ratio < 0.20, "Midpoint diff ratio {:.4} out of expected bounds (0.01 - 0.20)", diff_ratio);
+                assert!(has_yellow_diff, "Midpoint frame does not contain yellow text pixels");
+                assert!(has_white_diff, "Midpoint frame does not contain white text pixels");
+            } else if t > 2.95 {
+                // Exit finished: text should be fully invisible.
+                let t0_review = review_frames.iter().find(|r| r.timestamp < 0.05)
+                    .expect("Missing t=0.0 frame in review.json");
+                let t0_path = run_folder_path.join(&t0_review.file);
+                let t0_img = image::open(t0_path).expect("Failed to open t=0.0 frame image");
+
+                let mut diff_count = 0;
+                for y in (0..spec.composition.height).step_by(step_usize) {
+                    for x in (0..spec.composition.width).step_by(step_usize) {
+                        let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                        let t0_pixel = t0_img.get_pixel(x, y).to_rgba();
+                        for c in 0..3 {
+                            if (out_pixel[c] as i32 - t0_pixel[c] as i32).abs() > 2 {
+                                diff_count += 1;
+                            }
+                        }
+                    }
+                }
+                let diff_ratio = diff_count as f64 / (num_samples * 3.0);
+                assert!(diff_ratio < 0.01, "Text visible at end of exit transition or background mismatch (diff_ratio={:.4})", diff_ratio);
+            }
         }
+
 
         // Perform pixel checks
         let mut total_in_luma: u64 = 0;
         let mut total_out_luma: u64 = 0;
         let mut has_color = false;
-        let step_usize = 5usize;
-        let step_u32 = step_usize as u32;
+
 
         for y in (0..spec.composition.height).step_by(step_usize) {
             for x in (0..spec.composition.width).step_by(step_usize) {
@@ -254,7 +330,7 @@ fn run_test_case(spec_name: &str) {
             assert!(has_color, "Frame {} (t={:.2}) is grayscale but should have color!", review.frame, review.timestamp);
         }
 
-        let num_samples = (((spec.composition.height + step_u32 - 1) / step_u32) * ((spec.composition.width + step_u32 - 1) / step_u32)) as f64;
+
         let avg_in = total_in_luma as f64 / num_samples;
         let avg_out = total_out_luma as f64 / num_samples;
 
@@ -487,5 +563,10 @@ fn test_09_tactile_transitions() {
 #[test]
 fn test_10_dynamic_transitions() {
     run_test_case("10_dynamic_transitions.json");
+}
+
+#[test]
+fn test_11_text_transitions() {
+    run_test_case("11_text_transitions.json");
 }
 

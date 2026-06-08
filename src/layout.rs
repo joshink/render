@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::config::{LayoutNode, evaluate_float, evaluate_vec4, evaluate_padding};
+use crate::config::{LayoutNode, evaluate_float, evaluate_vec4, evaluate_padding, evaluate_scale_vec2};
 
 // ---------------------------------------------------------------------------
 // Layout data types
@@ -580,6 +580,38 @@ impl ResolvedNode {
         &self,
         dest: &mut image::RgbaImage,
         font_assets: &HashMap<String, Vec<u8>>,
+        clip_time: f32,
+        clip_duration: f32,
+        entrance: Option<&crate::config::TextTransition>,
+        exit: Option<&crate::config::TextTransition>,
+    ) {
+        // Pre-pass: count text units
+        let mut total_chars = 0;
+        let mut total_words = 0;
+        let mut total_lines = 0;
+        self.count_text_units(&mut total_chars, &mut total_words, &mut total_lines);
+
+        let mut state = RasterizeState {
+            font_assets,
+            clip_time,
+            clip_duration,
+            entrance,
+            exit,
+            char_index: 0,
+            word_index: 0,
+            line_index: 0,
+            total_chars,
+            total_words,
+            total_lines,
+        };
+
+        self.rasterize_rec(dest, &mut state);
+    }
+
+    fn rasterize_rec(
+        &self,
+        dest: &mut image::RgbaImage,
+        state: &mut RasterizeState,
     ) {
         match &self.r#type {
             ResolvedNodeType::Spacer { .. } => {}
@@ -587,7 +619,7 @@ impl ResolvedNode {
             | ResolvedNodeType::HStack { children, .. }
             | ResolvedNodeType::ZStack { children, .. } => {
                 for child in children {
-                    child.rasterize(dest, font_assets);
+                    child.rasterize_rec(dest, state);
                 }
             }
             ResolvedNodeType::Text {
@@ -606,7 +638,7 @@ impl ResolvedNode {
                     return;
                 }
 
-                let Some(font_bytes) = font_assets.get(font_id) else {
+                let Some(font_bytes) = state.font_assets.get(font_id) else {
                     return;
                 };
                 let Some(font) = swash::FontRef::from_index(font_bytes, 0) else {
@@ -642,6 +674,9 @@ impl ResolvedNode {
                 let dest_h = dest.height() as i32;
 
                 for (line_idx, line_str) in lines.iter().enumerate() {
+                    let current_line_idx = state.line_index;
+                    state.line_index += 1;
+
                     let line_y = cy + line_idx as f32 * *line_height + *ascent;
 
                     // Measure line width for alignment
@@ -657,9 +692,62 @@ impl ResolvedNode {
                         _ => cx, // left
                     };
 
+                    let mut in_word = false; // Reset word boundary per line
+
                     for c in line_str.chars() {
+                        // Word boundary detection
+                        let is_word_char = !c.is_whitespace();
+                        if is_word_char {
+                            if !in_word {
+                                in_word = true;
+                                if state.char_index > 0 || state.word_index > 0 {
+                                    state.word_index += 1;
+                                }
+                            }
+                        } else {
+                            in_word = false;
+                        }
+
+                        let cur_char_idx = state.char_index;
+                        if !c.is_whitespace() {
+                            state.char_index += 1;
+                        }
+
                         let gid = charmap.map(c);
                         let advance = glyph_metrics.advance_width(gid) * scale_factor;
+
+                        // Space characters don't render, just advance pen
+                        if c.is_whitespace() {
+                            pen_x += advance;
+                            continue;
+                        }
+
+                        // Calculate transition progress and parameters for this character
+                        let p = get_character_progress(cur_char_idx, state.word_index, current_line_idx, state);
+
+                        let active_start_transform = if state.clip_time < state.clip_duration * 0.5 {
+                            state.entrance.and_then(|e| e.start_transform.as_ref())
+                        } else {
+                            state.exit.and_then(|e| e.start_transform.as_ref())
+                        };
+
+                        let start_pos_offset = active_start_transform.and_then(|t| t.position_offset).unwrap_or([0.0, 0.0]);
+                        let start_scale = evaluate_scale_vec2(&active_start_transform.and_then(|t| t.scale.clone()), [1.0, 1.0]);
+                        let start_rotation = active_start_transform.and_then(|t| t.rotation).unwrap_or(0.0);
+                        let start_opacity = active_start_transform.and_then(|t| t.opacity).unwrap_or(0.0);
+
+                        // Interpolate
+                        let dx = (1.0 - p) * start_pos_offset[0];
+                        let dy = (1.0 - p) * start_pos_offset[1];
+                        let sx = start_scale[0] + p * (1.0 - start_scale[0]);
+                        let sy = start_scale[1] + p * (1.0 - start_scale[1]);
+                        let rot = (1.0 - p) * start_rotation;
+                        let alpha = (start_opacity + p * (1.0 - start_opacity)) * color[3];
+
+                        if alpha <= 0.0 {
+                            pen_x += advance;
+                            continue;
+                        }
 
                         let render_img = swash::scale::Render::new(&[
                             swash::scale::Source::ColorOutline(0),
@@ -668,77 +756,165 @@ impl ResolvedNode {
                         .render(&mut scaler, gid);
 
                         if let Some(g_img) = render_img {
-                            let gx = (pen_x + g_img.placement.left as f32).round() as i32;
-                            let gy = (line_y - g_img.placement.top as f32).round() as i32;
+                            let gx = pen_x + g_img.placement.left as f32;
+                            let gy = line_y - g_img.placement.top as f32;
 
-                            let gw = g_img.placement.width as i32;
-                            let gh = g_img.placement.height as i32;
+                            let gw = g_img.placement.width as f32;
+                            let gh = g_img.placement.height as f32;
 
-                            // Detect color vs mask glyph by data length.
-                            // Mask glyphs have 1 byte/pixel (w*h bytes total),
-                            // color glyphs have 4 bytes/pixel (w*h*4 bytes).
-                            let data = &g_img.data;
-                            let expected_mask_len = (gw * gh) as usize;
-                            let is_color = data.len() >= expected_mask_len * 4 && expected_mask_len > 0;
+                            if gw > 0.0 && gh > 0.0 {
+                                let cx = gx + gw * 0.5;
+                                let cy = gy + gh * 0.5;
 
-                            for my in 0..gh {
-                                for mx in 0..gw {
-                                    let px = gx + mx;
-                                    let py = gy + my;
+                                let cx_prime = cx + dx;
+                                let cy_prime = cy + dy;
 
-                                    if px < 0 || px >= dest_w || py < 0 || py >= dest_h {
-                                        continue;
-                                    }
+                                // Bounding box of the transformed glyph
+                                let corners = [
+                                    (gx, gy),
+                                    (gx + gw, gy),
+                                    (gx, gy + gh),
+                                    (gx + gw, gy + gh),
+                                ];
 
-                                    let (src_r, src_g, src_b, src_a) = if is_color {
-                                        // RGBA color glyph: 4 bytes per pixel
-                                        let base = (my * gw + mx) as usize * 4;
-                                        if base + 3 >= data.len() {
-                                            continue;
+                                let mut tx_min = f32::MAX;
+                                let mut tx_max = f32::MIN;
+                                let mut ty_min = f32::MAX;
+                                let mut ty_max = f32::MIN;
+
+                                let rad = rot.to_radians();
+                                let cos_theta = rad.cos();
+                                let sin_theta = rad.sin();
+
+                                for &(x, y) in &corners {
+                                    let rx = x - cx;
+                                    let ry = y - cy;
+                                    let sx_val = rx * sx;
+                                    let sy_val = ry * sy;
+                                    let rot_x = sx_val * cos_theta - sy_val * sin_theta;
+                                    let rot_y = sx_val * sin_theta + sy_val * cos_theta;
+                                    let tx = rot_x + cx_prime;
+                                    let ty = rot_y + cy_prime;
+
+                                    if tx < tx_min { tx_min = tx; }
+                                    if tx > tx_max { tx_max = tx; }
+                                    if ty < ty_min { ty_min = ty; }
+                                    if ty > ty_max { ty_max = ty; }
+                                }
+
+                                let start_x = (tx_min.floor() as i32).clamp(0, dest_w);
+                                let end_x = (tx_max.ceil() as i32).clamp(0, dest_w);
+                                let start_y = (ty_min.floor() as i32).clamp(0, dest_h);
+                                let end_y = (ty_max.ceil() as i32).clamp(0, dest_h);
+
+                                let data = &g_img.data;
+                                let expected_mask_len = (gw as i32 * gh as i32) as usize;
+                                let is_color = data.len() >= expected_mask_len * 4 && expected_mask_len > 0;
+
+                                let cos_neg_theta = rad.cos();
+                                let sin_neg_theta = (-rad).sin();
+                                let sx_inv = if sx.abs() > 1e-5 { 1.0 / sx } else { 0.0 };
+                                let sy_inv = if sy.abs() > 1e-5 { 1.0 / sy } else { 0.0 };
+
+                                for py in start_y..end_y {
+                                    for px in start_x..end_x {
+                                        let rx = px as f32 + 0.5 - cx_prime;
+                                        let ry = py as f32 + 0.5 - cy_prime;
+
+                                        let rot_x = rx * cos_neg_theta - ry * sin_neg_theta;
+                                        let rot_y = rx * sin_neg_theta + ry * cos_neg_theta;
+
+                                        let orig_x_rel = rot_x * sx_inv;
+                                        let orig_y_rel = rot_y * sy_inv;
+
+                                        let mx = orig_x_rel + gw * 0.5;
+                                        let my = orig_y_rel + gh * 0.5;
+
+                                        if mx >= 0.0 && mx < gw && my >= 0.0 && my < gh {
+                                            let x_floor = mx.floor();
+                                            let y_floor = my.floor();
+                                            let x_fract = mx - x_floor;
+                                            let y_fract = my - y_floor;
+
+                                            let x0 = (x_floor as i32).clamp(0, gw as i32 - 1) as usize;
+                                            let x1 = ((x_floor + 1.0) as i32).clamp(0, gw as i32 - 1) as usize;
+                                            let y0 = (y_floor as i32).clamp(0, gh as i32 - 1) as usize;
+                                            let y1 = ((y_floor + 1.0) as i32).clamp(0, gh as i32 - 1) as usize;
+
+                                            let (src_r, src_g, src_b, src_a) = if is_color {
+                                                let get_color_pixel = |x: usize, y: usize| -> (f32, f32, f32, f32) {
+                                                    let base = (y * gw as usize + x) * 4;
+                                                    (
+                                                        data[base] as f32 / 255.0,
+                                                        data[base + 1] as f32 / 255.0,
+                                                        data[base + 2] as f32 / 255.0,
+                                                        data[base + 3] as f32 / 255.0,
+                                                    )
+                                                };
+                                                let p00 = get_color_pixel(x0, y0);
+                                                let p10 = get_color_pixel(x1, y0);
+                                                let p01 = get_color_pixel(x0, y1);
+                                                let p11 = get_color_pixel(x1, y1);
+
+                                                let r0 = p00.0 * (1.0 - x_fract) + p10.0 * x_fract;
+                                                let r1 = p01.0 * (1.0 - x_fract) + p11.0 * x_fract;
+                                                let r = r0 * (1.0 - y_fract) + r1 * y_fract;
+
+                                                let g0 = p00.1 * (1.0 - x_fract) + p10.1 * x_fract;
+                                                let g1 = p01.1 * (1.0 - x_fract) + p11.1 * x_fract;
+                                                let g = g0 * (1.0 - y_fract) + g1 * y_fract;
+
+                                                let b0 = p00.2 * (1.0 - x_fract) + p10.2 * x_fract;
+                                                let b1 = p01.2 * (1.0 - x_fract) + p11.2 * x_fract;
+                                                let b = b0 * (1.0 - y_fract) + b1 * y_fract;
+
+                                                let a0 = p00.3 * (1.0 - x_fract) + p10.3 * x_fract;
+                                                let a1 = p01.3 * (1.0 - x_fract) + p11.3 * x_fract;
+                                                let a = a0 * (1.0 - y_fract) + a1 * y_fract;
+
+                                                (r, g, b, a * alpha)
+                                            } else {
+                                                let v00 = data[y0 * gw as usize + x0] as f32;
+                                                let v10 = data[y0 * gw as usize + x1] as f32;
+                                                let v01 = data[y1 * gw as usize + x0] as f32;
+                                                let v11 = data[y1 * gw as usize + x1] as f32;
+
+                                                let v0 = v00 * (1.0 - x_fract) + v10 * x_fract;
+                                                let v1 = v01 * (1.0 - x_fract) + v11 * x_fract;
+                                                let mask_val = v0 * (1.0 - y_fract) + v1 * y_fract;
+
+                                                let a = mask_val / 255.0 * alpha;
+                                                (color[0], color[1], color[2], a)
+                                            };
+
+                                            if src_a <= 0.0 {
+                                                continue;
+                                            }
+
+                                            let existing_pixel = dest.get_pixel(px as u32, py as u32);
+                                            let dr = existing_pixel[0] as f32 / 255.0;
+                                            let dg = existing_pixel[1] as f32 / 255.0;
+                                            let db = existing_pixel[2] as f32 / 255.0;
+                                            let da = existing_pixel[3] as f32 / 255.0;
+
+                                            let out_a = src_a + da * (1.0 - src_a);
+                                            if out_a > 0.0 {
+                                                let out_r = (src_r * src_a + dr * da * (1.0 - src_a)) / out_a;
+                                                let out_g = (src_g * src_a + dg * da * (1.0 - src_a)) / out_a;
+                                                let out_b = (src_b * src_a + db * da * (1.0 - src_a)) / out_a;
+
+                                                dest.put_pixel(
+                                                    px as u32,
+                                                    py as u32,
+                                                    image::Rgba([
+                                                        (out_r * 255.0).round().clamp(0.0, 255.0) as u8,
+                                                        (out_g * 255.0).round().clamp(0.0, 255.0) as u8,
+                                                        (out_b * 255.0).round().clamp(0.0, 255.0) as u8,
+                                                        (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+                                                    ]),
+                                                );
+                                            }
                                         }
-                                        (
-                                            data[base] as f32 / 255.0,
-                                            data[base + 1] as f32 / 255.0,
-                                            data[base + 2] as f32 / 255.0,
-                                            data[base + 3] as f32 / 255.0 * color[3],
-                                        )
-                                    } else {
-                                        // Alpha mask: 1 byte per pixel, tinted by text color
-                                        let mask_val = data[(my * gw + mx) as usize];
-                                        if mask_val == 0 {
-                                            continue;
-                                        }
-                                        let alpha = mask_val as f32 / 255.0 * color[3];
-                                        (color[0], color[1], color[2], alpha)
-                                    };
-
-                                    if src_a <= 0.0 {
-                                        continue;
-                                    }
-
-                                    // Porter-Duff source-over compositing
-                                    let existing_pixel = dest.get_pixel(px as u32, py as u32);
-                                    let dr = existing_pixel[0] as f32 / 255.0;
-                                    let dg = existing_pixel[1] as f32 / 255.0;
-                                    let db = existing_pixel[2] as f32 / 255.0;
-                                    let da = existing_pixel[3] as f32 / 255.0;
-
-                                    let out_a = src_a + da * (1.0 - src_a);
-                                    if out_a > 0.0 {
-                                        let out_r = (src_r * src_a + dr * da * (1.0 - src_a)) / out_a;
-                                        let out_g = (src_g * src_a + dg * da * (1.0 - src_a)) / out_a;
-                                        let out_b = (src_b * src_a + db * da * (1.0 - src_a)) / out_a;
-
-                                        dest.put_pixel(
-                                            px as u32,
-                                            py as u32,
-                                            image::Rgba([
-                                                (out_r * 255.0).round().clamp(0.0, 255.0) as u8,
-                                                (out_g * 255.0).round().clamp(0.0, 255.0) as u8,
-                                                (out_b * 255.0).round().clamp(0.0, 255.0) as u8,
-                                                (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
-                                            ]),
-                                        );
                                     }
                                 }
                             }
@@ -881,3 +1057,111 @@ fn wrap_paragraphs_approx(text: &str, char_w: f32, max_width: f32) -> (f32, Vec<
 
     (max_observed_w, lines)
 }
+
+impl ResolvedNode {
+    pub fn count_text_units(&self, chars: &mut usize, words: &mut usize, lines_count: &mut usize) {
+        match &self.r#type {
+            ResolvedNodeType::Spacer { .. } => {}
+            ResolvedNodeType::VStack { children, .. }
+            | ResolvedNodeType::HStack { children, .. }
+            | ResolvedNodeType::ZStack { children, .. } => {
+                for child in children {
+                    child.count_text_units(chars, words, lines_count);
+                }
+            }
+            ResolvedNodeType::Text { lines, .. } => {
+                let mut in_word = false;
+                for line in lines {
+                    *lines_count += 1;
+                    for c in line.chars() {
+                        if !c.is_whitespace() {
+                            *chars += 1;
+                            if !in_word {
+                                in_word = true;
+                                *words += 1;
+                            }
+                        } else {
+                            in_word = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct RasterizeState<'a> {
+    font_assets: &'a HashMap<String, Vec<u8>>,
+    clip_time: f32,
+    clip_duration: f32,
+    entrance: Option<&'a crate::config::TextTransition>,
+    exit: Option<&'a crate::config::TextTransition>,
+    char_index: usize,
+    word_index: usize,
+    line_index: usize,
+    total_chars: usize,
+    total_words: usize,
+    total_lines: usize,
+}
+
+fn apply_easing(t: f32, easing: &str) -> f32 {
+    match easing.to_ascii_lowercase().as_str() {
+        "ease_in" | "ease-in" => t * t,
+        "ease_out" | "ease-out" => t * (2.0 - t),
+        "ease_in_out" | "ease-in-out" => t * t * (3.0 - 2.0 * t),
+        _ => t, // "linear" or unknown
+    }
+}
+
+fn get_character_progress(
+    char_index: usize,
+    word_index: usize,
+    line_index: usize,
+    state: &RasterizeState,
+) -> f32 {
+    let mut p = 1.0;
+
+    if let Some(ent) = state.entrance {
+        let (idx, _total) = match ent.granularity.to_ascii_lowercase().as_str() {
+            "letter" | "character" => (char_index, state.total_chars),
+            "word" => (word_index, state.total_words),
+            "line" => (line_index, state.total_lines),
+            _ => (char_index, state.total_chars),
+        };
+        let delay_offset = idx as f32 * ent.delay;
+        let start_time = delay_offset;
+        let end_time = start_time + ent.duration.max(0.001);
+        let p_raw = if state.clip_time <= start_time {
+            0.0
+        } else if state.clip_time >= end_time {
+            1.0
+        } else {
+            (state.clip_time - start_time) / ent.duration.max(0.001)
+        };
+        p = apply_easing(p_raw, &ent.easing);
+    }
+
+    if let Some(ex) = state.exit {
+        let (idx, total) = match ex.granularity.to_ascii_lowercase().as_str() {
+            "letter" | "character" => (char_index, state.total_chars),
+            "word" => (word_index, state.total_words),
+            "line" => (line_index, state.total_lines),
+            _ => (char_index, state.total_chars),
+        };
+        let m_factor = (total.saturating_sub(1) - idx) as f32;
+        let start_time = (state.clip_duration - ex.duration - m_factor * ex.delay).max(0.0);
+        let end_time = start_time + ex.duration.max(0.001);
+        let p_raw = if state.clip_time <= start_time {
+            0.0
+        } else if state.clip_time >= end_time {
+            1.0
+        } else {
+            (state.clip_time - start_time) / ex.duration.max(0.001)
+        };
+        let p_exit = apply_easing(p_raw, &ex.easing);
+        p *= 1.0 - p_exit;
+    }
+
+    p
+}
+

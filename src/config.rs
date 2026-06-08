@@ -276,7 +276,49 @@ pub struct TextParams {
     // Layout fields
     pub kind: Option<String>,
     pub body: Option<LayoutNode>,
+
+    // Transitions
+    #[serde(default)]
+    pub entrance: Option<TextTransition>,
+    #[serde(default)]
+    pub exit: Option<TextTransition>,
 }
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct TextTransition {
+    #[serde(rename = "type")]
+    pub transition_type: String,
+    #[serde(default = "default_granularity")]
+    pub granularity: String,
+    #[serde(default)]
+    pub delay: f32,
+    pub duration: f32,
+    #[serde(default = "default_easing")]
+    pub easing: String,
+    #[serde(default)]
+    pub start_transform: Option<TextStartTransform>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct TextStartTransform {
+    #[serde(default)]
+    pub position_offset: Option<[f32; 2]>,
+    #[serde(default)]
+    pub scale: Option<serde_json::Value>,
+    #[serde(default)]
+    pub rotation: Option<f32>,
+    #[serde(default)]
+    pub opacity: Option<f32>,
+}
+
+fn default_granularity() -> String {
+    "letter".to_string()
+}
+
+fn default_easing() -> String {
+    "linear".to_string()
+}
+
 
 /// A node in the text layout tree.
 #[derive(Deserialize, Debug, Clone)]
@@ -705,6 +747,15 @@ impl RenderSpec {
                 events.push((clip_start, format!("Track '{}' - Clip '{}' starts", track.id, clip.id)));
                 events.push((clip_end, format!("Track '{}' - Clip '{}' ends", track.id, clip.id)));
 
+                if let Some(ref text) = clip.text_params {
+                    if text.entrance.is_some() || text.exit.is_some() {
+                        events.push((
+                            clip_start + clip.duration * 0.5,
+                            format!("Track '{}' - Clip '{}' - Midpoint", track.id, clip.id),
+                        ));
+                    }
+                }
+
                 if is_movie {
                     for effect in &clip.effects {
                         if let Some(meta) = registry.iter().find(|m| m.effect_type == effect.effect_type) {
@@ -1070,6 +1121,22 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, duration: f32, w
     }
     default
 }
+
+pub fn evaluate_scale_vec2(value: &Option<serde_json::Value>, default: [f32; 2]) -> [f32; 2] {
+    if let Some(val) = value {
+        if let Some(arr) = val.as_array() {
+            if arr.len() == 2 {
+                if let (Some(x), Some(y)) = (arr[0].as_f64(), arr[1].as_f64()) {
+                    return [x as f32, y as f32];
+                }
+            }
+        } else if let Some(num) = val.as_f64() {
+            return [num as f32, num as f32];
+        }
+    }
+    default
+}
+
 
 /// Evaluates a JSON value as an `[f32; 4]` color vector.
 pub fn evaluate_vec4(value: &serde_json::Value, clip_time: f32, duration: f32, width: u32, height: u32, default: [f32; 4]) -> [f32; 4] {

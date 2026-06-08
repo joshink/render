@@ -504,7 +504,6 @@ impl RenderContext {
                             &mut current_output,
                         );
                     }
-                    _ => {}
                 }
             }
         }
@@ -720,7 +719,17 @@ impl RenderContext {
                 spec.composition.height,
                 image::Rgba([0, 0, 0, 0]),
             );
-            resolved.rasterize(&mut dest_img, &self.font_assets);
+            let entrance = text_params.entrance.as_ref();
+            let exit = text_params.exit.as_ref();
+            println!("TRANSITION DEBUG: clip_time={}, duration={}, entrance={:?}, exit={:?}", clip_time, clip.duration, entrance, exit);
+            resolved.rasterize(
+                &mut dest_img,
+                &self.font_assets,
+                clip_time,
+                clip.duration,
+                entrance,
+                exit,
+            );
 
             self.queue.write_texture(
                 wgpu::ImageCopyTexture {
