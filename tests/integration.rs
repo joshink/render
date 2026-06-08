@@ -108,10 +108,13 @@ fn run_test_case(spec_name: &str) {
     let is_film_effects = spec_name == "16_film_effects.json";
     let is_depth_blur = spec_name == "17_depth_blur.json";
     let is_fluid_flow = spec_name == "18_fluid_flow.json";
+    let is_pixelation = spec_name == "19_pixelation.json";
+    let is_chromatic_aberration = spec_name == "20_chromatic_aberration.json";
 
     let is_identity = !static_grayscale && !static_dim && !static_bright
         && !is_blend_modes && !is_effect_layer && !is_transform_keyframe && !is_custom_shader_effect
-        && !is_hsl_adjust && !is_blur_glow && !is_film_effects && !is_depth_blur && !is_fluid_flow;
+        && !is_hsl_adjust && !is_blur_glow && !is_film_effects && !is_depth_blur && !is_fluid_flow
+        && !is_pixelation && !is_chromatic_aberration;
 
     // Assertions for each frame in review.json
     for review in &review_frames {
@@ -249,6 +252,38 @@ fn run_test_case(spec_name: &str) {
             let total_sampled_channels = num_samples * 3.0;
             let diff_ratio = diff_count as f64 / total_sampled_channels;
             assert!(diff_ratio > 0.05, "Frame {} did not have custom wave effect applied (diff_ratio={:.4} <= 0.05)", review.frame, diff_ratio);
+        } else if is_pixelation {
+            let mut diff_count = 0;
+            for y in (0..spec.composition.height).step_by(step_usize) {
+                for x in (0..spec.composition.width).step_by(step_usize) {
+                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+                    for c in 0..3 {
+                        if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 3 {
+                            diff_count += 1;
+                        }
+                    }
+                }
+            }
+            let total_sampled_channels = num_samples * 3.0;
+            let diff_ratio = diff_count as f64 / total_sampled_channels;
+            assert!(diff_ratio > 0.05, "Frame {} did not have pixelation applied (diff_ratio={:.4} <= 0.05)", review.frame, diff_ratio);
+        } else if is_chromatic_aberration {
+            let mut diff_count = 0;
+            for y in (0..spec.composition.height).step_by(step_usize) {
+                for x in (0..spec.composition.width).step_by(step_usize) {
+                    let out_pixel = out_img.get_pixel(x, y).to_rgba();
+                    let in_pixel = in_resized.get_pixel(x, y).to_rgba();
+                    for c in 0..3 {
+                        if (out_pixel[c] as i32 - in_pixel[c] as i32).abs() > 3 {
+                            diff_count += 1;
+                        }
+                    }
+                }
+            }
+            let total_sampled_channels = num_samples * 3.0;
+            let diff_ratio = diff_count as f64 / total_sampled_channels;
+            assert!(diff_ratio > 0.05, "Frame {} did not have chromatic aberration applied (diff_ratio={:.4} <= 0.05)", review.frame, diff_ratio);
         } else if is_hsl_adjust {
             let mut diff_count = 0;
             for y in (0..spec.composition.height).step_by(step_usize) {
@@ -461,5 +496,15 @@ fn test_17_depth_blur() {
 #[test]
 fn test_18_fluid_flow() {
     run_test_case("18_fluid_flow.json");
+}
+
+#[test]
+fn test_19_pixelation() {
+    run_test_case("19_pixelation.json");
+}
+
+#[test]
+fn test_20_chromatic_aberration() {
+    run_test_case("20_chromatic_aberration.json");
 }
 
