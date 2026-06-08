@@ -228,13 +228,36 @@ pub struct SolidParams {
 /// Parameters for a text clip including font selection and styling.
 #[derive(Deserialize, Debug, Clone)]
 pub struct TextParams {
-    pub text: String,
-    pub font: String,
-    pub font_size: serde_json::Value,
-    pub color: [f32; 4],
+    // Traditional fields
+    pub text: Option<String>,
+    pub font: Option<String>,
+    pub font_size: Option<serde_json::Value>,
+    pub color: Option<[f32; 4]>,
     #[serde(default)]
     pub axes: Option<HashMap<String, serde_json::Value>>,
+
+    // Layout fields
+    pub kind: Option<String>,
+    pub body: Option<LayoutNode>,
 }
+
+/// A node in the text layout tree.
+#[derive(Deserialize, Debug, Clone)]
+pub struct LayoutNode {
+    #[serde(rename = "type", alias = "kind")]
+    pub r#type: String, // "vstack", "hstack", "zstack", "spacer", "text"
+    pub spacing: Option<serde_json::Value>,
+    pub alignment: Option<String>,
+    pub children: Option<Vec<LayoutNode>>,
+    pub padding: Option<serde_json::Value>,
+    pub size: Option<serde_json::Value>,
+    pub text: Option<serde_json::Value>,
+    pub font: Option<String>,
+    pub font_size: Option<serde_json::Value>,
+    pub color: Option<serde_json::Value>,
+    pub axes: Option<HashMap<String, serde_json::Value>>,
+}
+
 
 /// Spatial transform properties (position, scale, rotation, opacity),
 /// each of which may be a literal, expression, or keyframe array.
@@ -973,7 +996,85 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, duration: f32, w
     default
 }
 
-/// Evaluates a single math expression string via `evalexpr`, with `time`,
+/// Evaluates a JSON value as an `[f32; 4]` color vector.
+pub fn evaluate_vec4(value: &serde_json::Value, clip_time: f32, duration: f32, width: u32, height: u32, default: [f32; 4]) -> [f32; 4] {
+    if value.is_null() {
+        return default;
+    }
+    if let Some(arr) = value.as_array() {
+        if arr.len() == 4 {
+            let r = evaluate_float(&arr[0], clip_time, duration, width, height, default[0]);
+            let g = evaluate_float(&arr[1], clip_time, duration, width, height, default[1]);
+            let b = evaluate_float(&arr[2], clip_time, duration, width, height, default[2]);
+            let a = evaluate_float(&arr[3], clip_time, duration, width, height, default[3]);
+            return [r, g, b, a];
+        }
+        // Keyframes: [{ "time": t, "value": [r,g,b,a] | scalar }, ...]
+        if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
+            let mut kfs: Vec<(f32, [f32; 4])> = Vec::new();
+            for item in arr {
+                if let (Some(t_val), Some(v_val)) = (item.get("time"), item.get("value")) {
+                    let t = t_val.as_f64().unwrap_or(0.0) as f32;
+                    let v = evaluate_vec4(v_val, t, duration, width, height, default);
+                    kfs.push((t, v));
+                }
+            }
+            if kfs.is_empty() {
+                return default;
+            }
+            kfs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            if clip_time <= kfs[0].0 {
+                return kfs[0].1;
+            }
+            if clip_time >= kfs[kfs.len() - 1].0 {
+                return kfs[kfs.len() - 1].1;
+            }
+            for window in kfs.windows(2) {
+                let kf1 = window[0];
+                let kf2 = window[1];
+                if clip_time >= kf1.0 && clip_time <= kf2.0 {
+                    let progress = (clip_time - kf1.0) / (kf2.0 - kf1.0);
+                    return [
+                        kf1.1[0] + progress * (kf2.1[0] - kf1.1[0]),
+                        kf1.1[1] + progress * (kf2.1[1] - kf1.1[1]),
+                        kf1.1[2] + progress * (kf2.1[2] - kf1.1[2]),
+                        kf1.1[3] + progress * (kf2.1[3] - kf1.1[3]),
+                    ];
+                }
+            }
+        }
+    }
+    if let Some(num) = value.as_f64() {
+        let val_f = num as f32;
+        return [val_f, val_f, val_f, val_f];
+    }
+    default
+}
+
+/// Evaluates a JSON value as padding: [top, right, bottom, left]
+pub fn evaluate_padding(value: &serde_json::Value, clip_time: f32, duration: f32, width: u32, height: u32, default: [f32; 4]) -> [f32; 4] {
+    if value.is_null() {
+        return default;
+    }
+    if let Some(arr) = value.as_array() {
+        if arr.len() == 4 {
+            let t = evaluate_float(&arr[0], clip_time, duration, width, height, 0.0);
+            let r = evaluate_float(&arr[1], clip_time, duration, width, height, 0.0);
+            let b = evaluate_float(&arr[2], clip_time, duration, width, height, 0.0);
+            let l = evaluate_float(&arr[3], clip_time, duration, width, height, 0.0);
+            return [t, r, b, l];
+        } else if arr.len() == 2 {
+            let v = evaluate_float(&arr[0], clip_time, duration, width, height, 0.0);
+            let h = evaluate_float(&arr[1], clip_time, duration, width, height, 0.0);
+            return [v, h, v, h];
+        }
+    }
+    let p = evaluate_float(value, clip_time, duration, width, height, default[0]);
+    [p, p, p, p]
+}
+
+/// Evaluates a single math expression string via `evalexpr`
+/// with `time`,
 /// `clip_time`, `clip_duration`, `comp_width`, `comp_height`, and `pi` available as variables.
 /// Falls back to a plain `f32::parse` if the expression engine can't handle it.
 pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, width: u32, height: u32, default: f32) -> f32 {

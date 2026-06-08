@@ -421,6 +421,17 @@ fn main() {
     // ── Asset loading ────────────────────────────────────────────────────
     let img_load_start = Instant::now();
     let cpu_images = load_asset_images(&spec);
+    let mut font_assets = HashMap::new();
+    for (asset_id, asset) in &spec.assets {
+        if let Asset::Font { path, .. } = asset {
+            let bytes = std::fs::read(path).unwrap_or_else(|e| {
+                error!("Failed to read font file '{}': {:?}", path, e);
+                Vec::new()
+            });
+            info!("Loaded font asset '{}' from {}", asset_id, path);
+            font_assets.insert(asset_id.clone(), bytes);
+        }
+    }
     let img_load_dur = img_load_start.elapsed();
 
     // ── GPU initialisation ───────────────────────────────────────────────
@@ -462,6 +473,11 @@ fn main() {
     let texture_d = device.create_texture(&texture_desc);
     let feedback_texture_a = device.create_texture(&texture_desc);
     let feedback_texture_b = device.create_texture(&texture_desc);
+    let text_scratch_texture_desc = wgpu::TextureDescriptor {
+        label: Some("Text Scratch Texture"),
+        ..texture_desc
+    };
+    let text_scratch_texture = device.create_texture(&text_scratch_texture_desc);
 
     // Clear feedback textures to transparent black
     {
@@ -974,7 +990,9 @@ fn main() {
         device,
         queue,
         gpu_textures,
+        font_assets,
         transparent_texture,
+        text_scratch_texture,
         texture_a,
         texture_b,
         texture_c,

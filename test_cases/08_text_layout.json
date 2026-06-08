@@ -1,0 +1,85 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/08_text_layout.mp4",
+  "composition": {
+    "width": 800,
+    "height": 800,
+    "fps": 30,
+    "duration": 4.0
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    },
+    "gt_canon": {
+      "type": "font",
+      "provider": "local",
+      "path": "fonts/GT-Canon-VF.ttf"
+    },
+    "gt_canon_italic": {
+      "type": "font",
+      "provider": "local",
+      "path": "fonts/GT-Canon-Italic-VF.ttf"
+    }
+  },
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "input_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 4.0
+        }
+      ]
+    },
+    {
+      "id": "text_overlay_track",
+      "clips": [
+        {
+          "id": "layout_text_clip",
+          "type": "text",
+          "duration": 4.0,
+          "text_params": {
+            "kind": "layout",
+            "body": {
+              "type": "vstack",
+              "spacing": 20.0,
+              "alignment": "center",
+              "padding": [40.0, 40.0, 40.0, 40.0],
+              "children": [
+                {
+                  "type": "text",
+                  "text": "GT Canon Variable Font",
+                  "font": "gt_canon",
+                  "font_size": 48.0,
+                  "color": [0.9, 0.8, 0.2, 1.0],
+                  "alignment": "center",
+                  "axes": {
+                    "wght": {
+                      "expression": "300.0 + 400.0 * (0.5 + 0.5 * sin(clip_time * 3.14159))"
+                    }
+                  }
+                },
+                {
+                  "type": "spacer",
+                  "size": 30.0
+                },
+                {
+                  "type": "text",
+                  "text": "This text should wrap automatically because the layout engine handles width constraints and line breaks dynamically.",
+                  "font": "gt_canon_italic",
+                  "font_size": 32.0,
+                  "color": [1.0, 1.0, 1.0, 0.9],
+                  "alignment": "center"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

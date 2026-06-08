@@ -242,8 +242,12 @@ pub struct RenderContext {
     pub queue: wgpu::Queue,
     /// Pre-uploaded media/image textures, keyed by asset ID.
     pub gpu_textures: std::collections::HashMap<String, wgpu::Texture>,
+    /// Pre-loaded font assets, keyed by asset ID.
+    pub font_assets: std::collections::HashMap<String, Vec<u8>>,
     /// A 1×1 transparent texture used as a fallback when a clip has no asset.
     pub transparent_texture: wgpu::Texture,
+    /// Dynamic scratch texture used to upload frame-by-frame text layouts.
+    pub text_scratch_texture: wgpu::Texture,
     /// Ping-pong texture A (see struct-level docs).
     pub texture_a: wgpu::Texture,
     /// Ping-pong texture B (see struct-level docs).
@@ -274,6 +278,7 @@ pub struct RenderContext {
     pub workgroups_x: u32,
     pub workgroups_y: u32,
 }
+
 
 impl RenderContext {
     /// Renders a single frame of the composition at the given `time` (seconds).
@@ -327,6 +332,12 @@ impl RenderContext {
                                 &mut sub_input_a, &mut sub_output_a,
                             );
                         }
+                        ClipType::Text => {
+                            self.composite_text_clip(
+                                from_clip, clip_time_a, spec,
+                                &mut sub_input_a, &mut sub_output_a,
+                            );
+                        }
                         _ => {}
                     }
                     
@@ -350,6 +361,12 @@ impl RenderContext {
                     match to_clip.clip_type {
                         ClipType::Media | ClipType::Solid => {
                             self.composite_media_clip(
+                                to_clip, clip_time_b, spec,
+                                &mut sub_input_b, &mut sub_output_b,
+                            );
+                        }
+                        ClipType::Text => {
+                            self.composite_text_clip(
                                 to_clip, clip_time_b, spec,
                                 &mut sub_input_b, &mut sub_output_b,
                             );
@@ -387,6 +404,12 @@ impl RenderContext {
                 match clip.clip_type {
                     ClipType::Media | ClipType::Solid => {
                         self.composite_media_clip(
+                            clip, clip_time, spec,
+                            &mut current_input, &mut current_output,
+                        );
+                    }
+                    ClipType::Text => {
+                        self.composite_text_clip(
                             clip, clip_time, spec,
                             &mut current_input, &mut current_output,
                         );
@@ -583,6 +606,152 @@ impl RenderContext {
         self.queue.submit(Some(encoder.finish()));
         std::mem::swap(current_input, current_output);
     }
+
+    /// Composites a text overlay layout clip.
+    fn composite_text_clip<'a>(
+        &self,
+        clip: &Clip,
+        clip_time: f32,
+        spec: &RenderSpec,
+        current_input: &mut &'a wgpu::Texture,
+        current_output: &mut &'a wgpu::Texture,
+    ) {
+        if let Some(ref text_params) = clip.text_params {
+            let root_node = if let Some(ref kind) = text_params.kind {
+                if kind == "layout" {
+                    text_params.body.clone().expect("Layout body missing")
+                } else {
+                    Self::simple_to_layout(text_params)
+                }
+            } else if text_params.body.is_some() {
+                text_params.body.clone().unwrap()
+            } else {
+                Self::simple_to_layout(text_params)
+            };
+
+            let mut resolved = crate::layout::resolve_layout_node(
+                &root_node,
+                clip_time,
+                clip.duration,
+                spec.composition.width,
+                spec.composition.height,
+            );
+
+            resolved.measure(
+                spec.composition.width as f32,
+                spec.composition.height as f32,
+                &self.font_assets,
+            );
+            resolved.arrange(
+                0.0,
+                0.0,
+                spec.composition.width as f32,
+                spec.composition.height as f32,
+            );
+
+            let mut dest_img = image::ImageBuffer::from_pixel(
+                spec.composition.width,
+                spec.composition.height,
+                image::Rgba([0, 0, 0, 0]),
+            );
+            resolved.rasterize(&mut dest_img, &self.font_assets);
+
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.text_scratch_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &dest_img,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * spec.composition.width),
+                    rows_per_image: Some(spec.composition.height),
+                },
+                self.texture_size,
+            );
+
+            let position = clip.eval_position(clip_time, spec.composition.width, spec.composition.height);
+            let scale = clip.eval_scale(clip_time, spec.composition.width, spec.composition.height);
+            let rotation = clip.eval_rotation(clip_time, spec.composition.width, spec.composition.height);
+            let opacity = clip.eval_opacity(clip_time, spec.composition.width, spec.composition.height);
+            let blend_mode_u32 = clip.blend_mode.as_ref().map(|b| b.clone().as_u32()).unwrap_or(0);
+            let expanded_effects = spec.expand_effects(&clip.effects, clip_time, clip.duration, spec.composition.width, spec.composition.height, 0);
+            let (grayscale, brightness) = crate::config::eval_built_in_effects_from_effects(&expanded_effects, clip_time, clip.duration, spec.composition.width, spec.composition.height);
+
+            let media_texture_view = create_default_view(&self.text_scratch_texture);
+
+            let comp_params = CompositorParams {
+                position,
+                scale,
+                rotation,
+                opacity,
+                clip_type: 0u32, // Media in compositor.wgsl
+                blend_mode: blend_mode_u32,
+                grayscale,
+                brightness,
+                _padding: [0, 0],
+                solid_color: [0.0, 0.0, 0.0, 1.0],
+            };
+            self.queue.write_buffer(&self.compositor_params_buffer, 0, bytemuck::bytes_of(&comp_params));
+
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Compositor Bind Group (Text)"),
+                layout: &self.compositor_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&create_default_view(current_input)),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&media_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&create_default_view(current_output)),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.compositor_params_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Compositor Dispatch (Text)"),
+            });
+            {
+                let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compositor Compute Pass (Text)"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(&self.compositor_pipeline);
+                compute_pass.set_bind_group(0, &bind_group, &[]);
+                compute_pass.dispatch_workgroups(self.workgroups_x, self.workgroups_y, 1);
+            }
+            self.queue.submit(Some(encoder.finish()));
+            std::mem::swap(current_input, current_output);
+        }
+    }
+
+    fn simple_to_layout(params: &crate::config::TextParams) -> crate::config::LayoutNode {
+        crate::config::LayoutNode {
+            r#type: "text".to_string(),
+            spacing: None,
+            alignment: None,
+            children: None,
+            padding: None,
+            size: None,
+            text: params.text.as_ref().map(|s| serde_json::Value::String(s.clone())),
+            font: params.font.clone(),
+            font_size: params.font_size.clone(),
+            color: params.color.as_ref().map(|c| serde_json::Value::from(c.to_vec())),
+            axes: params.axes.clone(),
+        }
+    }
+
 
     /// Dispatches an effect (either built-in or custom) using the unified compute layout.
     fn dispatch_effect<'a>(

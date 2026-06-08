@@ -435,3 +435,8 @@ fn test_07_ripple_relative() {
     run_test_case("07_ripple_relative.json");
 }
 
+#[test]
+fn test_08_text_layout() {
+    run_test_case("08_text_layout.json");
+}
+
