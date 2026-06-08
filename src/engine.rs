@@ -619,12 +619,18 @@ impl RenderContext {
         if let Some(ref text_params) = clip.text_params {
             let root_node = if let Some(ref kind) = text_params.kind {
                 if kind == "layout" {
-                    text_params.body.clone().expect("Layout body missing")
+                    match text_params.body.clone() {
+                        Some(body) => body,
+                        None => {
+                            log::error!("Text clip kind='layout' but body is missing, skipping");
+                            return;
+                        }
+                    }
                 } else {
                     Self::simple_to_layout(text_params)
                 }
-            } else if text_params.body.is_some() {
-                text_params.body.clone().unwrap()
+            } else if let Some(ref body) = text_params.body {
+                body.clone()
             } else {
                 Self::simple_to_layout(text_params)
             };
