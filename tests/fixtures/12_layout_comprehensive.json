@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/12_layout_comprehensive.mp4",
+  "output": "tests/fixtures/outputs/12_layout_comprehensive.mp4",
   "composition": {
     "width": 1080,
     "height": 1920,

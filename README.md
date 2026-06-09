@@ -120,7 +120,7 @@ To build and run the rendering engine, ensure you have:
 Clone the repository and compile the project in release mode:
 
 ```bash
-git clone https://github.com/yourusername/render.git
+git clone https://github.com/joshink/render.git
 cd render
 cargo build --release
 ```

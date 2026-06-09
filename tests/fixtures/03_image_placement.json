@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/03_image_placement.mp4",
+  "output": "tests/fixtures/outputs/03_image_placement.mp4",
   "composition": {
     "width": 800,
     "height": 600,

@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/06_movie_audio.mp4",
+  "output": "tests/fixtures/outputs/06_movie_audio.mp4",
   "composition": {
     "width": 800,
     "height": 800,

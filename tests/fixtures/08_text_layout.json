@@ -1,11 +1,11 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/11_text_transitions.mp4",
+  "output": "tests/fixtures/outputs/08_text_layout.mp4",
   "composition": {
     "width": 800,
     "height": 800,
     "fps": 30,
-    "duration": 3.0
+    "duration": 4.0
   },
   "assets": {
     "input_image": {
@@ -31,8 +31,7 @@
           "id": "input_clip",
           "type": "media",
           "asset": "input_image",
-          "duration": 3.0,
-          "scale_mode": "stretch"
+          "duration": 4.0
         }
       ]
     },
@@ -40,9 +39,9 @@
       "id": "text_overlay_track",
       "clips": [
         {
-          "id": "transition_text_clip",
+          "id": "layout_text_clip",
           "type": "text",
-          "duration": 3.0,
+          "duration": 4.0,
           "text_params": {
             "kind": "layout",
             "body": {
@@ -53,43 +52,30 @@
               "children": [
                 {
                   "type": "text",
-                  "text": "ANIMATED TEXT",
+                  "text": "GT Canon Variable Font",
                   "font": "gt_canon",
-                  "font_size": 64.0,
-                  "color": [1.0, 0.9, 0.1, 1.0],
-                  "alignment": "center"
+                  "font_size": 48.0,
+                  "color": [0.9, 0.8, 0.2, 1.0],
+                  "alignment": "center",
+                  "axes": {
+                    "wght": {
+                      "expression": "300.0 + 400.0 * (0.5 + 0.5 * sin(clip_time * 3.14159))"
+                    }
+                  }
+                },
+                {
+                  "type": "spacer",
+                  "size": 30.0
                 },
                 {
                   "type": "text",
-                  "text": "Transitions are beautiful.",
+                  "text": "This text should wrap automatically because the layout engine handles width constraints and line breaks dynamically.",
                   "font": "gt_canon_italic",
-                  "font_size": 36.0,
-                  "color": [1.0, 1.0, 1.0, 1.0],
+                  "font_size": 32.0,
+                  "color": [1.0, 1.0, 1.0, 0.9],
                   "alignment": "center"
                 }
               ]
-            },
-            "entrance": {
-              "type": "reveal",
-              "granularity": "letter",
-              "delay": 0.02,
-              "duration": 0.4,
-              "easing": "ease_out",
-              "start_transform": {
-                "position_offset": [0.0, 30.0],
-                "opacity": 0.0
-              }
-            },
-            "exit": {
-              "type": "reveal",
-              "granularity": "line",
-              "delay": 0.15,
-              "duration": 0.4,
-              "easing": "ease_in",
-              "start_transform": {
-                "scale": 0.1,
-                "opacity": 0.0
-              }
             }
           }
         }

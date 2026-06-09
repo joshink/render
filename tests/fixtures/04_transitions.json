@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/04_transitions.mp4",
+  "output": "tests/fixtures/outputs/04_transitions.mp4",
   "composition": {
     "width": 800,
     "height": 800,

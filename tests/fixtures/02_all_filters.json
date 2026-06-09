@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/02_all_filters.mp4",
+  "output": "tests/fixtures/outputs/02_all_filters.mp4",
   "composition": {
     "width": 1024,
     "height": 1024,

@@ -1,6 +1,6 @@
 /target
 /output.png
-/test_cases/outputs/
+/tests/fixtures/outputs/
 .DS_Store
 **/.DS_Store
 __pycache__/

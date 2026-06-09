@@ -21,7 +21,7 @@ echo ""
 echo -e "${BOLD}====================================================${NC}"
 echo -e "${BOLD} 3. Generated Output Files:${NC}"
 echo -e "${BOLD}====================================================${NC}"
-ls -la test_cases/outputs/
+ls -la tests/fixtures/outputs/
 
 echo ""
 echo -e "${GREEN}${BOLD}✓ All progressive test cases ran and verified successfully!${NC}"

@@ -8,12 +8,12 @@ use render_poc::config::{RenderSpec, ClipType};
 
 
 fn run_test_case(spec_name: &str) {
-    let spec_path = format!("test_cases/{}", spec_name);
+    let spec_path = format!("tests/fixtures/{}", spec_name);
     let binary_path = env!("CARGO_BIN_EXE_render-poc");
     
     // Determine the base folder name (e.g., "01_identity" from "01_identity.json")
     let spec_base = spec_name.strip_suffix(".json").unwrap_or(spec_name);
-    let debug_base_dir = format!("test_cases/outputs/debug/{}", spec_base);
+    let debug_base_dir = format!("tests/fixtures/outputs/debug/{}", spec_base);
     
     println!("Running binary: {} with spec: {} and debug dir: {}", binary_path, spec_path, debug_base_dir);
 
@@ -557,7 +557,7 @@ fn test_06_movie_audio() {
     run_test_case("06_movie_audio.json");
     
     // Verify audio stream presence using ffprobe
-    let output_path = Path::new("test_cases/outputs/06_movie_audio.mp4");
+    let output_path = Path::new("tests/fixtures/outputs/06_movie_audio.mp4");
     let ffprobe_status = Command::new("ffprobe")
         .args(&[
             "-v", "error",
@@ -610,7 +610,7 @@ fn test_13_remote_assets() {
     run_test_case("13_remote_assets.json");
     
     // Verify audio stream presence using ffprobe
-    let output_path = Path::new("test_cases/outputs/13_remote_assets.mp4");
+    let output_path = Path::new("tests/fixtures/outputs/13_remote_assets.mp4");
     let ffprobe_status = Command::new("ffprobe")
         .args(&[
             "-v", "error",
@@ -633,7 +633,7 @@ fn test_14_trim_start() {
     run_test_case("14_trim_start.json");
     
     // Verify audio stream presence using ffprobe
-    let output_path = Path::new("test_cases/outputs/14_trim_start.mp4");
+    let output_path = Path::new("tests/fixtures/outputs/14_trim_start.mp4");
     let ffprobe_status = Command::new("ffprobe")
         .args(&[
             "-v", "error",
@@ -655,9 +655,9 @@ fn test_14_trim_start() {
 #[ignore] // Requires network access — makes a real (failing) S3 request with fake credentials.
 // Run explicitly with: cargo test test_15_remote_upload -- --ignored
 fn test_15_remote_upload() {
-    let spec_path = "test_cases/15_remote_upload.json";
+    let spec_path = "tests/fixtures/15_remote_upload.json";
     let binary_path = env!("CARGO_BIN_EXE_render-poc");
-    let debug_base_dir = "test_cases/outputs/debug/15_remote_upload";
+    let debug_base_dir = "tests/fixtures/outputs/debug/15_remote_upload";
 
     println!("Running binary: {} with spec: {} and debug dir: {}", binary_path, spec_path, debug_base_dir);
 

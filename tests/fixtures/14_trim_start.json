@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/14_trim_start.mp4",
+  "output": "tests/fixtures/outputs/14_trim_start.mp4",
   "composition": {
     "width": 800,
     "height": 800,

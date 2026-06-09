@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/05_complex_features.mp4",
+  "output": "tests/fixtures/outputs/05_complex_features.mp4",
   "composition": {
     "width": 800,
     "height": 800,
@@ -14,7 +14,7 @@
     },
     "custom_wave_shader": {
       "type": "shader",
-      "path": "test_cases/custom_wave.wgsl"
+      "path": "tests/fixtures/custom_wave.wgsl"
     }
   },
   "presets": [

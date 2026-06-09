@@ -1,13 +1,26 @@
 {
   "version": "1.0",
-  "output": "test_cases/outputs/10_dynamic_transitions.mp4",
+  "output": "tests/fixtures/outputs/09_tactile_transitions.mp4",
   "composition": {
     "width": 800,
     "height": 800,
     "fps": 30,
     "duration": 8.0
   },
-  "assets": {},
+  "assets": {
+    "flash_burn_shader": {
+      "type": "shader",
+      "path": "library/transitions/flash_burn.wgsl"
+    },
+    "focus_in_shader": {
+      "type": "shader",
+      "path": "library/transitions/focus_in.wgsl"
+    },
+    "slide_switch_shader": {
+      "type": "shader",
+      "path": "library/transitions/slide_switch.wgsl"
+    }
+  },
   "tracks": [
     {
       "id": "main_track",
@@ -47,16 +60,22 @@
       ],
       "transitions": [
         {
-          "id": "fade_trans",
-          "type": "fade",
+          "id": "burn_trans",
+          "type": "custom_shader",
+          "shader": "flash_burn_shader",
           "start": 1.5,
           "duration": 1.0,
           "from": "red_clip",
-          "to": "green_clip"
+          "to": "green_clip",
+          "params": {
+            "burn_intensity": 1.2,
+            "flash_intensity": 0.7
+          }
         },
         {
           "id": "focus_trans",
-          "type": "focus_in",
+          "type": "custom_shader",
+          "shader": "focus_in_shader",
           "start": 3.5,
           "duration": 1.0,
           "from": "green_clip",
@@ -67,7 +86,8 @@
         },
         {
           "id": "slide_trans",
-          "type": "slide_switch",
+          "type": "custom_shader",
+          "shader": "slide_switch_shader",
           "start": 5.5,
           "duration": 1.0,
           "from": "blue_clip",
