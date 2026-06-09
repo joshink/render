@@ -1,0 +1,37 @@
+{
+  "version": "1.0",
+  "output": {
+    "path": "s3://test-bucket/output_test_remote.png",
+    "credentials": {
+      "key": "FAKE_KEY_12345",
+      "secret": "FAKE_SECRET_12345",
+      "region": "us-east-1"
+    }
+  },
+  "composition": {
+    "width": 1024,
+    "height": 1024,
+    "fps": 30,
+    "duration": 0.1
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    }
+  },
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "input_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 0.1,
+          "effects": []
+        }
+      ]
+    }
+  ]
+}

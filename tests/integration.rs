@@ -56,7 +56,7 @@ fn run_test_case(spec_name: &str) {
     // Parse spec first to get output path and composition parameters
     let spec_file = std::fs::File::open(&spec_path).expect("Failed to open spec JSON file");
     let spec: RenderSpec = serde_json::from_reader(spec_file).expect("Failed to parse spec JSON file");
-    let output_path = Path::new(&spec.output);
+    let output_path = Path::new(spec.output.path());
     
     // Clean up old output if it exists
     if output_path.exists() {
@@ -686,6 +686,52 @@ fn test_14_trim_start() {
         panic!("Failed to run ffprobe to verify audio");
     }
 }
+
+#[test]
+#[ignore] // Requires network access — makes a real (failing) S3 request with fake credentials.
+// Run explicitly with: cargo test test_15_remote_upload -- --ignored
+fn test_15_remote_upload() {
+    let spec_path = "test_cases/15_remote_upload.json";
+    let binary_path = env!("CARGO_BIN_EXE_render-poc");
+    let debug_base_dir = "test_cases/outputs/debug/15_remote_upload";
+
+    println!("Running binary: {} with spec: {} and debug dir: {}", binary_path, spec_path, debug_base_dir);
+
+    // Clean up old debug folder if it exists
+    let debug_base_path = Path::new(&debug_base_dir);
+    if debug_base_path.exists() {
+        std::fs::remove_dir_all(debug_base_path).expect("Failed to clean up old debug base directory");
+    }
+
+    // Execute the rendering binary
+    let output = Command::new(binary_path)
+        .arg("-i")
+        .arg(&spec_path)
+        .arg("--debug")
+        .arg(&debug_base_dir)
+        .output()
+        .expect("Failed to run rendering binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined_output = format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+    println!("Binary combined output:\n{}", combined_output);
+
+    // The upload MUST fail because of the fake credentials (InvalidAccessKeyId, 403, or invalid S3 connection)
+    assert!(!output.status.success(), "Binary execution should have failed due to fake credentials/bucket");
+
+    // We expect the log/stderr/stdout to indicate a failed upload
+    assert!(
+        combined_output.contains("Upload failed") || combined_output.contains("S3 PUT failed") || combined_output.contains("panic"),
+        "The output did not contain expected upload failure message. Output:\n{}",
+        combined_output
+    );
+
+    println!("test_15_remote_upload successfully verified end-to-end flow attempted S3 upload and failed as expected.");
+}
+
+
+
 
 
 

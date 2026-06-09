@@ -1,6 +1,7 @@
 use log::{LevelFilter, error, info};
 use render_poc::config::*;
 use render_poc::engine::{EngineParams, RenderContext, TransitionEngineParams};
+use render_poc::upload::{upload_signed_url, upload_s3, upload_gcs};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
@@ -53,6 +54,10 @@ struct CliArgs {
     debug_dir: Option<std::path::PathBuf>,
     include_paths: Vec<std::path::PathBuf>,
     overrides: Vec<(String, String)>,
+    aws_key: Option<String>,
+    aws_secret: Option<String>,
+    gcs_key: Option<String>,
+    gcs_secret: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
@@ -61,6 +66,10 @@ fn parse_args() -> CliArgs {
     let mut debug_dir_path_str = None;
     let mut include_paths = Vec::new();
     let mut overrides = Vec::new();
+    let mut aws_key = None;
+    let mut aws_secret = None;
+    let mut gcs_key = None;
+    let mut gcs_secret = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -92,6 +101,11 @@ fn parse_args() -> CliArgs {
                 }
             }
             "-o" | "--output" => {
+                // NOTE: Using -o overrides the entire "output" field in the spec JSON
+                // with a plain string. If the spec contained a detailed output object
+                // with credentials, those credentials will be discarded. When using -o
+                // with remote paths, supply credentials via --aws-key/--aws-secret
+                // (or --gcs-key/--gcs-secret) flags or environment variables instead.
                 if i + 1 < args.len() {
                     overrides.push(("output".to_string(), args[i + 1].clone()));
                     i += 2;
@@ -136,6 +150,42 @@ fn parse_args() -> CliArgs {
                     std::process::exit(1);
                 }
             }
+            "--aws-key" => {
+                if i + 1 < args.len() {
+                    aws_key = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --aws-key option");
+                    std::process::exit(1);
+                }
+            }
+            "--aws-secret" => {
+                if i + 1 < args.len() {
+                    aws_secret = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --aws-secret option");
+                    std::process::exit(1);
+                }
+            }
+            "--gcs-key" => {
+                if i + 1 < args.len() {
+                    gcs_key = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --gcs-key option");
+                    std::process::exit(1);
+                }
+            }
+            "--gcs-secret" => {
+                if i + 1 < args.len() {
+                    gcs_secret = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: Missing value for --gcs-secret option");
+                    std::process::exit(1);
+                }
+            }
             "--set" => {
                 if i + 1 < args.len() {
                     let kv = args[i + 1].clone();
@@ -165,7 +215,7 @@ fn parse_args() -> CliArgs {
     }
 
     let spec_path_str = spec_path_str.unwrap_or_else(|| {
-        eprintln!("Usage: render-poc [-i <spec.json>] [--debug <dir>] [-I <path>] [-o/--output <path>] [--width <val>] [--height <val>] [--fps <val>] [--duration <val>] [--set <key=value>]");
+        eprintln!("Usage: render-poc [-i <spec.json>] [--debug <dir>] [-I <path>] [-o/--output <path>] [--width <val>] [--height <val>] [--fps <val>] [--duration <val>] [--set <key=value>] [--aws-key <key>] [--aws-secret <secret>] [--gcs-key <key>] [--gcs-secret <secret>]");
         std::process::exit(1);
     });
 
@@ -174,6 +224,10 @@ fn parse_args() -> CliArgs {
         debug_dir: debug_dir_path_str.map(std::path::PathBuf::from),
         include_paths,
         overrides,
+        aws_key,
+        aws_secret,
+        gcs_key,
+        gcs_secret,
     }
 }
 
@@ -380,6 +434,7 @@ fn load_asset_images(spec: &RenderSpec) -> HashMap<String, image::RgbaImage> {
 fn build_ffmpeg_args(
     spec: &RenderSpec,
     audio_clips: &[(String, f32, f32, f32)],
+    output_path: &str,
 ) -> Vec<String> {
     let mut ffmpeg_args = vec![
         "-y".to_string(),
@@ -443,7 +498,7 @@ fn build_ffmpeg_args(
         ffmpeg_args.push("libx264".to_string());
     }
 
-    ffmpeg_args.push(spec.output.clone());
+    ffmpeg_args.push(output_path.to_string());
     ffmpeg_args
 }
 
@@ -1123,15 +1178,62 @@ fn compile_pipelines(
     }
 }
 
+/// RAII guard that removes a temporary file when dropped, ensuring cleanup
+/// even on panic.
+struct TempFileGuard {
+    path: Option<String>,
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(ref path) = self.path {
+            if let Err(e) = std::fs::remove_file(path) {
+                log::warn!("Failed to remove temporary file {}: {}", path, e);
+            }
+        }
+    }
+}
+
 fn run_render_loop(
     render_context: RenderContext,
     spec: &RenderSpec,
+    args: &CliArgs,
     run_dir_path: &Option<std::path::PathBuf>,
     spot_check_frames: &HashMap<u32, Vec<(f32, String)>>,
     render_dur: &mut std::time::Duration,
     save_dur: &mut std::time::Duration,
-) {
-    let is_movie = spec.output.ends_with(".mp4");
+) -> Result<(), String> {
+    let dest_path = spec.output.path();
+    let is_remote = dest_path.starts_with("s3://")
+        || dest_path.starts_with("gs://")
+        || dest_path.starts_with("http://")
+        || dest_path.starts_with("https://");
+
+    let is_movie = spec.output.clean_path().ends_with(".mp4");
+
+    let render_output_path = if is_remote {
+        let temp_dir = std::env::temp_dir();
+        let ext = if is_movie { "mp4" } else { "png" };
+        let temp_file = temp_dir.join(format!(
+            "render_output_{}_{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            ext
+        ));
+        temp_file.to_string_lossy().to_string()
+    } else {
+        dest_path.to_string()
+    };
+
+    // RAII guard: ensures temp file is cleaned up even if we panic during
+    // rendering or upload. Disarmed (set to None) for local outputs.
+    let _temp_guard = TempFileGuard {
+        path: if is_remote { Some(render_output_path.clone()) } else { None },
+    };
+
     let render_frame = |time: f32| -> Vec<u8> {
         render_context.render_frame(time, spec)
     };
@@ -1142,7 +1244,7 @@ fn run_render_loop(
         let num_frames = (spec.composition.duration * fps as f32).round() as u32;
 
         let audio_clips = spec.get_audio_clips();
-        let ffmpeg_args = build_ffmpeg_args(spec, &audio_clips);
+        let ffmpeg_args = build_ffmpeg_args(spec, &audio_clips, &render_output_path);
 
         let save_start_inst = Instant::now();
         let mut ffmpeg_cmd = Command::new("ffmpeg")
@@ -1207,7 +1309,7 @@ fn run_render_loop(
 
         let frame_save_start = Instant::now();
         image::save_buffer(
-            &spec.output,
+            &render_output_path,
             &unpadded_pixels,
             spec.composition.width,
             spec.composition.height,
@@ -1216,6 +1318,46 @@ fn run_render_loop(
         .expect("Failed to save output image");
         *save_dur += frame_save_start.elapsed();
     }
+
+    if is_remote {
+        info!("Uploading rendered output from {} to remote destination {}...", render_output_path, dest_path);
+        let upload_start = Instant::now();
+        
+        let upload_result = if dest_path.starts_with("http://") || dest_path.starts_with("https://") {
+            upload_signed_url(&render_output_path, dest_path)
+        } else if dest_path.starts_with("s3://") {
+            let (key, secret, region) = if let Some(creds) = spec.output.credentials() {
+                (creds.key.clone().or_else(|| args.aws_key.clone()), creds.secret.clone().or_else(|| args.aws_secret.clone()), creds.region.clone())
+            } else {
+                (args.aws_key.clone(), args.aws_secret.clone(), None)
+            };
+            upload_s3(&render_output_path, dest_path, key, secret, region)
+        } else if dest_path.starts_with("gs://") {
+            let (key, secret, region) = if let Some(creds) = spec.output.credentials() {
+                (creds.key.clone().or_else(|| args.gcs_key.clone()), creds.secret.clone().or_else(|| args.gcs_secret.clone()), creds.region.clone())
+            } else {
+                (args.gcs_key.clone(), args.gcs_secret.clone(), None)
+            };
+            upload_gcs(&render_output_path, dest_path, key, secret, region)
+        } else {
+            Err(format!("Unsupported remote scheme in output: {}", dest_path))
+        };
+
+        match upload_result {
+            Ok(()) => {
+                info!("Upload completed successfully in {:?}", upload_start.elapsed());
+            }
+            Err(e) => {
+                error!("Upload failed: {}", e);
+                // temp_guard will clean up the file on drop
+                return Err(format!("Upload failed: {}", e));
+            }
+        }
+
+        // Upload succeeded — guard will clean up the temp file on drop
+    }
+
+    Ok(())
 }
 
 fn main() {
@@ -1308,7 +1450,7 @@ fn main() {
     if run_dir_path.is_some() {
         let events = spec.get_spot_check_events();
         let fps = spec.composition.fps;
-        let is_movie = spec.output.ends_with(".mp4");
+        let is_movie = spec.output.clean_path().ends_with(".mp4");
         let num_frames = if is_movie {
             (spec.composition.duration * fps as f32).round() as u32
         } else {
@@ -1418,14 +1560,19 @@ fn main() {
         workgroups_y: (spec.composition.height + 15) / 16,
     };
 
-    run_render_loop(
+    let render_result = run_render_loop(
         render_context,
         &spec,
+        &args,
         &run_dir_path,
         &spot_check_frames,
         &mut render_dur,
         &mut save_dur,
     );
+
+    if let Err(ref e) = render_result {
+        error!("{}", e);
+    }
 
     // ── Debug review & performance report ────────────────────────────────
     if let Some(ref run_dir) = run_dir_path {
@@ -1447,4 +1594,8 @@ fn main() {
         mem_after_gpu,
         mem_after_render,
     });
+
+    if render_result.is_err() {
+        std::process::exit(1);
+    }
 }

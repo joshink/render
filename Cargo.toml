@@ -15,4 +15,6 @@ bytemuck = { version = "1.16", features = ["derive"] }
 libc = "0.2"
 evalexpr = "11.3.0"
 swash = "0.1.19"
+rust-s3 = { version = "0.33", default-features = false, features = ["blocking", "sync-native-tls"] }
+ureq = "2.9"
 

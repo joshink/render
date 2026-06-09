@@ -110,12 +110,53 @@ pub fn extract_metadata(wgsl: &str) -> Option<String> {
 // Data model — deserialized from the JSON render spec
 // ---------------------------------------------------------------------------
 
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum OutputConfig {
+    Simple(String),
+    Detailed {
+        path: String,
+        credentials: Option<OutputCredentials>,
+    },
+}
+
+impl OutputConfig {
+    pub fn path(&self) -> &str {
+        match self {
+            OutputConfig::Simple(s) => s,
+            OutputConfig::Detailed { path, .. } => path,
+        }
+    }
+
+    pub fn credentials(&self) -> Option<&OutputCredentials> {
+        match self {
+            OutputConfig::Simple(_) => None,
+            OutputConfig::Detailed { credentials, .. } => credentials.as_ref(),
+        }
+    }
+
+    /// Returns the path with any query parameters stripped.
+    /// Useful for extension-based format detection (e.g. `.mp4` vs `.png`)
+    /// when the path may contain signed-URL query strings.
+    pub fn clean_path(&self) -> &str {
+        let p = self.path();
+        p.split('?').next().unwrap_or(p)
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct OutputCredentials {
+    pub key: Option<String>,
+    pub secret: Option<String>,
+    pub region: Option<String>,
+}
+
 /// Root specification for a render job, containing composition settings,
 /// assets, tracks, and optional audio tracks.
 #[derive(Deserialize, Debug, Clone)]
 pub struct RenderSpec {
     pub version: String,
-    pub output: String,
+    pub output: OutputConfig,
     pub composition: Composition,
     pub assets: HashMap<String, Asset>,
     #[serde(default)]
@@ -736,7 +777,7 @@ impl RenderSpec {
 
     pub fn get_spot_check_events(&self) -> Vec<(f32, String)> {
         let mut events = Vec::new();
-        let is_movie = self.output.ends_with(".mp4");
+        let is_movie = self.output.clean_path().ends_with(".mp4");
 
         events.push((0.0, "Composition start".to_string()));
         events.push((self.composition.duration, "Composition end".to_string()));
