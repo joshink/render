@@ -295,6 +295,18 @@ This project was built from scratch using a **Vibe Coding** process powered by G
 
 ---
 
+## 🙏 Credits & Acknowledgments
+
+Some of the post-processing effects and transition shaders in the `library/` directory were adapted or inspired by the excellent work in [basementstudio/shader-lab](https://github.com/basementstudio/shader-lab). 
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License. See the [LICENSE](file:///Users/joshink/Development/render/LICENSE) file for details.
+
+---
+
 ## ⚖️ Disclaimer
 
 This repository is **for educational purposes only**. It is a proof-of-concept demonstrating headless GPU video composition. It is **not** optimized or audited for production workloads, memory leaks under continuous use, or security vulnerabilities in untrusted custom WGSL shaders. Use at your own risk.
