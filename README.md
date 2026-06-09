@@ -135,11 +135,10 @@ cargo run --release -- spec.json
 
 ### Running Tests
 
-The project features a progressive integration test suite that tests everything from simple filters to multi-clip transitions, layout calculations, audio mixes, and S3-compatible cloud uploads. Run all tests via the test orchestrator:
+The project features a progressive integration test suite that tests everything from simple filters to multi-clip transitions, layout calculations, audio mixes, and S3-compatible cloud uploads. Run all tests using:
 
 ```bash
-chmod +x run_tests.sh
-./run_tests.sh
+cargo test --release
 ```
 
 ---
