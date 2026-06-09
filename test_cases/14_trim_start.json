@@ -1,0 +1,47 @@
+{
+  "version": "1.0",
+  "output": "test_cases/outputs/14_trim_start.mp4",
+  "composition": {
+    "width": 800,
+    "height": 800,
+    "fps": 30,
+    "duration": 5.0
+  },
+  "assets": {
+    "input_image": {
+      "type": "image",
+      "path": "input.jpg"
+    },
+    "background_audio": {
+      "type": "audio",
+      "path": "https://cdn.parta.dev/audio/CF1372D3-1010-4CBD-B27E-7A36D79E3CC9.m4a"
+    }
+  },
+  "tracks": [
+    {
+      "id": "main_track",
+      "clips": [
+        {
+          "id": "input_clip",
+          "type": "media",
+          "asset": "input_image",
+          "duration": 5.0,
+          "trim_start": 2.5
+        }
+      ]
+    }
+  ],
+  "audio_tracks": [
+    {
+      "id": "music_track_1",
+      "clips": [
+        {
+          "id": "music_clip_1",
+          "asset": "background_audio",
+          "duration": 5.0,
+          "trim_start": 1.0
+        }
+      ]
+    }
+  ]
+}

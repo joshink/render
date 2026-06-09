@@ -236,6 +236,8 @@ pub struct Clip {
     #[serde(default)]
     pub offset: f32,
     #[serde(default)]
+    pub trim_start: f32,
+    #[serde(default)]
     pub scale_mode: Option<String>,
     #[serde(default)]
     pub solid_params: Option<SolidParams>,

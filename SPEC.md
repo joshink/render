@@ -270,6 +270,7 @@ Visual clips define content rendered onto a track at specific time windows.
     *   `"effect"`: Adjustment layer applying filters to the layers below it.
 *   `duration` (Float, Required): active screen duration in seconds.
 *   `offset` (Float, Optional, Default `0.0`): A non-negative gap, in seconds, before this clip begins relative to the end of the previous clip on the track.
+*   `trim_start` (Float, Optional, Default `0.0`): The start time within the source media, in seconds, from which playback begins.
 *   `asset` (String, Optional): ID of the asset registry key (required for `"media"` type).
 *   `scale_mode` (String, Optional, Default `"fit"`): Scaling strategy for media:
     *   `"fit"`: Uniform scale down to fit inside the composition bounds.

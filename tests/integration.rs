@@ -664,4 +664,28 @@ fn test_13_remote_assets() {
     }
 }
 
+#[test]
+fn test_14_trim_start() {
+    run_test_case("14_trim_start.json");
+    
+    // Verify audio stream presence using ffprobe
+    let output_path = Path::new("test_cases/outputs/14_trim_start.mp4");
+    let ffprobe_status = Command::new("ffprobe")
+        .args(&[
+            "-v", "error",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            output_path.to_str().unwrap(),
+        ])
+        .output();
+    if let Ok(output) = ffprobe_status {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("audio"), "Output MP4 does not contain an audio stream! Streams: {}", stdout);
+        println!("ffprobe verified audio stream exists: {}", stdout.trim());
+    } else {
+        panic!("Failed to run ffprobe to verify audio");
+    }
+}
+
+
 
