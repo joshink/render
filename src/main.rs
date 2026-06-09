@@ -1,5 +1,6 @@
 use log::{LevelFilter, error, info};
 use render_poc::config::*;
+use render_poc::download::fetch_remote_url;
 use render_poc::engine::{EngineParams, RenderContext, TransitionEngineParams};
 use render_poc::upload::{upload_signed_url, upload_s3, upload_gcs};
 use serde::Serialize;
@@ -60,174 +61,112 @@ struct CliArgs {
     gcs_secret: Option<String>,
 }
 
+#[derive(clap::Parser, Debug)]
+#[command(name = "render-poc", version = "0.1.0", about = "Headless GPU-accelerated video rendering engine")]
+struct Opts {
+    /// Path to the JSON render specification
+    #[arg(short = 'i', long = "input")]
+    input: Option<std::path::PathBuf>,
+
+    /// Positional fallback for input path if -i/--input is not provided
+    positional_input: Option<std::path::PathBuf>,
+
+    /// Directory to output debug frames and logs
+    #[arg(long = "debug")]
+    debug: Option<std::path::PathBuf>,
+
+    /// Include directories for WGSL shaders
+    #[arg(short = 'I', long = "include")]
+    include_paths: Vec<std::path::PathBuf>,
+
+    /// Override the output path in the spec
+    #[arg(short = 'o', long = "output")]
+    output: Option<String>,
+
+    /// Override the composition width
+    #[arg(long = "width")]
+    width: Option<String>,
+
+    /// Override the composition height
+    #[arg(long = "height")]
+    height: Option<String>,
+
+    /// Override the composition fps
+    #[arg(long = "fps")]
+    fps: Option<String>,
+
+    /// Override the composition duration
+    #[arg(long = "duration")]
+    duration: Option<String>,
+
+    /// AWS Access Key ID override
+    #[arg(long = "aws-key")]
+    aws_key: Option<String>,
+
+    /// AWS Secret Access Key override
+    #[arg(long = "aws-secret")]
+    aws_secret: Option<String>,
+
+    /// GCS Access Key ID override
+    #[arg(long = "gcs-key")]
+    gcs_key: Option<String>,
+
+    /// GCS Secret Access Key override
+    #[arg(long = "gcs-secret")]
+    gcs_secret: Option<String>,
+
+    /// Set an arbitrary override in key=value format
+    #[arg(long = "set")]
+    set: Vec<String>,
+}
+
 fn parse_args() -> CliArgs {
-    let args: Vec<String> = env::args().collect();
-    let mut spec_path_str = None;
-    let mut debug_dir_path_str = None;
-    let mut include_paths = Vec::new();
+    use clap::Parser;
+    let opts = Opts::parse();
+
+    let spec_path = opts.input
+        .or(opts.positional_input)
+        .unwrap_or_else(|| {
+            eprintln!("Error: Missing input spec file path. Use -i/--input or pass as a positional argument.");
+            std::process::exit(1);
+        });
+
     let mut overrides = Vec::new();
-    let mut aws_key = None;
-    let mut aws_secret = None;
-    let mut gcs_key = None;
-    let mut gcs_secret = None;
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-i" => {
-                if i + 1 < args.len() {
-                    spec_path_str = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for -i option");
-                    std::process::exit(1);
-                }
-            }
-            "--debug" => {
-                if i + 1 < args.len() {
-                    debug_dir_path_str = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --debug option");
-                    std::process::exit(1);
-                }
-            }
-            "-I" | "--include" => {
-                if i + 1 < args.len() {
-                    include_paths.push(std::path::PathBuf::from(args[i + 1].clone()));
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for -I/--include option");
-                    std::process::exit(1);
-                }
-            }
-            "-o" | "--output" => {
-                // NOTE: Using -o overrides the entire "output" field in the spec JSON
-                // with a plain string. If the spec contained a detailed output object
-                // with credentials, those credentials will be discarded. When using -o
-                // with remote paths, supply credentials via --aws-key/--aws-secret
-                // (or --gcs-key/--gcs-secret) flags or environment variables instead.
-                if i + 1 < args.len() {
-                    overrides.push(("output".to_string(), args[i + 1].clone()));
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for -o/--output option");
-                    std::process::exit(1);
-                }
-            }
-            "--width" => {
-                if i + 1 < args.len() {
-                    overrides.push(("composition.width".to_string(), args[i + 1].clone()));
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --width option");
-                    std::process::exit(1);
-                }
-            }
-            "--height" => {
-                if i + 1 < args.len() {
-                    overrides.push(("composition.height".to_string(), args[i + 1].clone()));
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --height option");
-                    std::process::exit(1);
-                }
-            }
-            "--fps" => {
-                if i + 1 < args.len() {
-                    overrides.push(("composition.fps".to_string(), args[i + 1].clone()));
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --fps option");
-                    std::process::exit(1);
-                }
-            }
-            "--duration" => {
-                if i + 1 < args.len() {
-                    overrides.push(("composition.duration".to_string(), args[i + 1].clone()));
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --duration option");
-                    std::process::exit(1);
-                }
-            }
-            "--aws-key" => {
-                if i + 1 < args.len() {
-                    aws_key = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --aws-key option");
-                    std::process::exit(1);
-                }
-            }
-            "--aws-secret" => {
-                if i + 1 < args.len() {
-                    aws_secret = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --aws-secret option");
-                    std::process::exit(1);
-                }
-            }
-            "--gcs-key" => {
-                if i + 1 < args.len() {
-                    gcs_key = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --gcs-key option");
-                    std::process::exit(1);
-                }
-            }
-            "--gcs-secret" => {
-                if i + 1 < args.len() {
-                    gcs_secret = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --gcs-secret option");
-                    std::process::exit(1);
-                }
-            }
-            "--set" => {
-                if i + 1 < args.len() {
-                    let kv = args[i + 1].clone();
-                    if let Some(pos) = kv.find('=') {
-                        let key = kv[..pos].to_string();
-                        let val = kv[pos + 1..].to_string();
-                        overrides.push((key, val));
-                    } else {
-                        eprintln!("Error: Invalid format for --set, expected key=value, got: {}", kv);
-                        std::process::exit(1);
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("Error: Missing value for --set option");
-                    std::process::exit(1);
-                }
-            }
-            s if s.starts_with('-') => {
-                eprintln!("Error: Unknown option: {}", s);
-                std::process::exit(1);
-            }
-            s => {
-                spec_path_str = Some(s.to_string());
-                i += 1;
-            }
+    if let Some(val) = opts.output {
+        overrides.push(("output".to_string(), val));
+    }
+    if let Some(val) = opts.width {
+        overrides.push(("composition.width".to_string(), val));
+    }
+    if let Some(val) = opts.height {
+        overrides.push(("composition.height".to_string(), val));
+    }
+    if let Some(val) = opts.fps {
+        overrides.push(("composition.fps".to_string(), val));
+    }
+    if let Some(val) = opts.duration {
+        overrides.push(("composition.duration".to_string(), val));
+    }
+    for kv in opts.set {
+        if let Some(pos) = kv.find('=') {
+            let key = kv[..pos].to_string();
+            let val = kv[pos + 1..].to_string();
+            overrides.push((key, val));
+        } else {
+            eprintln!("Error: Invalid format for --set, expected key=value, got: {}", kv);
+            std::process::exit(1);
         }
     }
 
-    let spec_path_str = spec_path_str.unwrap_or_else(|| {
-        eprintln!("Usage: render-poc [-i <spec.json>] [--debug <dir>] [-I <path>] [-o/--output <path>] [--width <val>] [--height <val>] [--fps <val>] [--duration <val>] [--set <key=value>] [--aws-key <key>] [--aws-secret <secret>] [--gcs-key <key>] [--gcs-secret <secret>]");
-        std::process::exit(1);
-    });
-
     CliArgs {
-        spec_path: std::path::PathBuf::from(spec_path_str),
-        debug_dir: debug_dir_path_str.map(std::path::PathBuf::from),
-        include_paths,
+        spec_path,
+        debug_dir: opts.debug,
+        include_paths: opts.include_paths,
         overrides,
-        aws_key,
-        aws_secret,
-        gcs_key,
-        gcs_secret,
+        aws_key: opts.aws_key,
+        aws_secret: opts.aws_secret,
+        gcs_key: opts.gcs_key,
+        gcs_secret: opts.gcs_secret,
     }
 }
 
@@ -355,56 +294,6 @@ fn init_gpu() -> (wgpu::Device, wgpu::Queue, String) {
 }
 
 // ─── Asset loading ────────────────────────────────────────────────────────────
-
-/// Fetches a remote URL using curl and caches it locally under target/cache.
-/// Returns the path to the local cached file.
-fn fetch_remote_url(url: &str) -> Result<String, String> {
-    let cache_dir = std::path::Path::new("target/cache");
-    if !cache_dir.exists() {
-        std::fs::create_dir_all(cache_dir)
-            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
-    }
-
-    let hash = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        url.hash(&mut hasher);
-        hasher.finish()
-    };
-
-    // Strip query parameters to find clean extension
-    let clean_url_path = url.split('?').next().unwrap_or(url);
-    let extension = std::path::Path::new(clean_url_path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("bin");
-
-    let cache_path = cache_dir.join(format!("{}.{}", hash, extension));
-
-    if cache_path.exists() {
-        info!("Cache hit for remote URL: {} -> {:?}", url, cache_path);
-        return Ok(cache_path.to_string_lossy().to_string());
-    }
-
-    info!("Cache miss, downloading remote URL: {} -> {:?}", url, cache_path);
-
-    let status = Command::new("curl")
-        .arg("-L") // follow redirects
-        .arg("-s") // silent
-        .arg("-f") // fail on server errors
-        .arg("-o")
-        .arg(&cache_path)
-        .arg(url)
-        .status()
-        .map_err(|e| format!("Failed to run curl: {}", e))?;
-
-    if !status.success() {
-        return Err(format!("curl download failed for URL {} with status {:?}", url, status));
-    }
-
-    Ok(cache_path.to_string_lossy().to_string())
-}
 
 
 
@@ -1387,6 +1276,9 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    sort_value_keyframes(&mut spec_value);
+
     
     let mut spec: RenderSpec = serde_json::from_value(spec_value).expect("Failed to deserialize final spec with overrides");
     let spec_load_dur = spec_start.elapsed();

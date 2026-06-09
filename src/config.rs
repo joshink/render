@@ -1041,10 +1041,36 @@ pub fn eval_shader_params_from_effects(
     params
 }
 
+/// Recursively scans any JSON value (whether in a Transform, Effect, or LayoutNode)
+/// and pre-sorts keyframe arrays by the "time" field.
+pub fn sort_value_keyframes(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::Array(arr) => {
+            if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
+                arr.sort_by(|a, b| {
+                    let t_a = a.get("time").and_then(|t| t.as_f64()).unwrap_or(0.0);
+                    let t_b = b.get("time").and_then(|t| t.as_f64()).unwrap_or(0.0);
+                    t_a.partial_cmp(&t_b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            } else {
+                for item in arr {
+                    sort_value_keyframes(item);
+                }
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (_, v) in obj {
+                sort_value_keyframes(v);
+            }
+        }
+        _ => {}
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Expression / keyframe evaluators
 // ---------------------------------------------------------------------------
+
 
 /// Evaluates a JSON value as a single `f32`. The value may be:
 /// - A **literal number** — returned directly.
@@ -1074,33 +1100,37 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, duration: f32, 
             return default;
         }
         if arr[0].is_object() && arr[0].get("time").is_some() {
-            let mut kfs: Vec<(f32, f32)> = Vec::new();
-            for item in arr {
-                if let (Some(t_val), Some(v_val)) = (item.get("time"), item.get("value")) {
-                    let t = t_val.as_f64().unwrap_or(0.0) as f32;
-                    let v = v_val.as_f64().unwrap_or(0.0) as f32;
-                    kfs.push((t, v));
+            let get_kf = |item: &serde_json::Value| -> Option<(f32, f32)> {
+                let t = item.get("time")?.as_f64()? as f32;
+                let v = item.get("value")?.as_f64()? as f32;
+                Some((t, v))
+            };
+
+            if arr.len() == 1 {
+                return get_kf(&arr[0]).map(|(_, v)| v).unwrap_or(default);
+            }
+
+            let first_kf = get_kf(&arr[0]);
+            let last_kf = get_kf(&arr[arr.len() - 1]);
+
+            if let Some((t0, v0)) = first_kf {
+                if clip_time <= t0 {
+                    return v0;
                 }
             }
-            if kfs.is_empty() {
-                return default;
+            if let Some((tn, vn)) = last_kf {
+                if clip_time >= tn {
+                    return vn;
+                }
             }
-            kfs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            // Clamp to first keyframe
-            if clip_time <= kfs[0].0 {
-                return kfs[0].1;
-            }
-            // Clamp to last keyframe
-            if clip_time >= kfs[kfs.len() - 1].0 {
-                return kfs[kfs.len() - 1].1;
-            }
-            // Linear interpolation between surrounding keyframes
-            for window in kfs.windows(2) {
-                let kf1 = window[0];
-                let kf2 = window[1];
-                if clip_time >= kf1.0 && clip_time <= kf2.0 {
-                    let progress = (clip_time - kf1.0) / (kf2.0 - kf1.0);
-                    return kf1.1 + progress * (kf2.1 - kf1.1);
+
+            // Iterate over windows of 2
+            for i in 0..arr.len() - 1 {
+                if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
+                    if clip_time >= t1 && clip_time <= t2 {
+                        let progress = (clip_time - t1) / (t2 - t1).max(0.0001);
+                        return v1 + progress * (v2 - v1);
+                    }
                 }
             }
         }
@@ -1128,43 +1158,52 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, duration: f32, w
         }
         // Keyframe array: [{ "time": t, "value": [x, y] | n }, ...]
         if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
-            let mut kfs: Vec<(f32, [f32; 2])> = Vec::new();
-            for item in arr {
-                if let (Some(t_val), Some(v_val)) = (item.get("time"), item.get("value")) {
-                    let t = t_val.as_f64().unwrap_or(0.0) as f32;
-                    if let Some(v_arr) = v_val.as_array() {
-                        if v_arr.len() == 2 {
-                            let vx = v_arr[0].as_f64().unwrap_or(0.0) as f32;
-                            let vy = v_arr[1].as_f64().unwrap_or(0.0) as f32;
-                            kfs.push((t, [vx, vy]));
-                        }
-                    } else if let Some(v_num) = v_val.as_f64() {
-                        // Scalar value broadcast to both components
-                        kfs.push((t, [v_num as f32, v_num as f32]));
+            let get_kf = |item: &serde_json::Value| -> Option<(f32, [f32; 2])> {
+                let t = item.get("time")?.as_f64()? as f32;
+                let v_val = item.get("value")?;
+                let v = if let Some(v_arr) = v_val.as_array() {
+                    if v_arr.len() == 2 {
+                        let vx = v_arr[0].as_f64()? as f32;
+                        let vy = v_arr[1].as_f64()? as f32;
+                        [vx, vy]
+                    } else {
+                        return None;
                     }
+                } else if let Some(v_num) = v_val.as_f64() {
+                    [v_num as f32, v_num as f32]
+                } else {
+                    return None;
+                };
+                Some((t, v))
+            };
+
+            if arr.len() == 1 {
+                return get_kf(&arr[0]).map(|(_, v)| v).unwrap_or(default);
+            }
+
+            let first_kf = get_kf(&arr[0]);
+            let last_kf = get_kf(&arr[arr.len() - 1]);
+
+            if let Some((t0, v0)) = first_kf {
+                if clip_time <= t0 {
+                    return v0;
                 }
             }
-            if kfs.is_empty() {
-                return default;
+            if let Some((tn, vn)) = last_kf {
+                if clip_time >= tn {
+                    return vn;
+                }
             }
-            kfs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            // Clamp to first keyframe
-            if clip_time <= kfs[0].0 {
-                return kfs[0].1;
-            }
-            // Clamp to last keyframe
-            if clip_time >= kfs[kfs.len() - 1].0 {
-                return kfs[kfs.len() - 1].1;
-            }
-            // Linear interpolation between surrounding keyframes
-            for window in kfs.windows(2) {
-                let kf1 = window[0];
-                let kf2 = window[1];
-                if clip_time >= kf1.0 && clip_time <= kf2.0 {
-                    let progress = (clip_time - kf1.0) / (kf2.0 - kf1.0);
-                    let rx = kf1.1[0] + progress * (kf2.1[0] - kf1.1[0]);
-                    let ry = kf1.1[1] + progress * (kf2.1[1] - kf1.1[1]);
-                    return [rx, ry];
+
+            // Iterate over windows of 2
+            for i in 0..arr.len() - 1 {
+                if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
+                    if clip_time >= t1 && clip_time <= t2 {
+                        let progress = (clip_time - t1) / (t2 - t1).max(0.0001);
+                        let rx = v1[0] + progress * (v2[0] - v1[0]);
+                        let ry = v1[1] + progress * (v2[1] - v1[1]);
+                        return [rx, ry];
+                    }
                 }
             }
         }
@@ -1223,35 +1262,58 @@ pub fn evaluate_vec4(value: &serde_json::Value, clip_time: f32, duration: f32, w
         }
         // Keyframes: [{ "time": t, "value": [r,g,b,a] | scalar }, ...]
         if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
-            let mut kfs: Vec<(f32, [f32; 4])> = Vec::new();
-            for item in arr {
-                if let (Some(t_val), Some(v_val)) = (item.get("time"), item.get("value")) {
-                    let t = t_val.as_f64().unwrap_or(0.0) as f32;
-                    let v = evaluate_vec4(v_val, t, duration, width, height, default);
-                    kfs.push((t, v));
+            let get_kf = |item: &serde_json::Value| -> Option<(f32, [f32; 4])> {
+                let t = item.get("time")?.as_f64()? as f32;
+                let v_val = item.get("value")?;
+                let v = if let Some(v_arr) = v_val.as_array() {
+                    if v_arr.len() == 4 {
+                        let vr = v_arr[0].as_f64()? as f32;
+                        let vg = v_arr[1].as_f64()? as f32;
+                        let vb = v_arr[2].as_f64()? as f32;
+                        let va = v_arr[3].as_f64()? as f32;
+                        [vr, vg, vb, va]
+                    } else {
+                        return None;
+                    }
+                } else if let Some(v_num) = v_val.as_f64() {
+                    let f = v_num as f32;
+                    [f, f, f, f]
+                } else {
+                    return None;
+                };
+                Some((t, v))
+            };
+
+            if arr.len() == 1 {
+                return get_kf(&arr[0]).map(|(_, v)| v).unwrap_or(default);
+            }
+
+            let first_kf = get_kf(&arr[0]);
+            let last_kf = get_kf(&arr[arr.len() - 1]);
+
+            if let Some((t0, v0)) = first_kf {
+                if clip_time <= t0 {
+                    return v0;
                 }
             }
-            if kfs.is_empty() {
-                return default;
+            if let Some((tn, vn)) = last_kf {
+                if clip_time >= tn {
+                    return vn;
+                }
             }
-            kfs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            if clip_time <= kfs[0].0 {
-                return kfs[0].1;
-            }
-            if clip_time >= kfs[kfs.len() - 1].0 {
-                return kfs[kfs.len() - 1].1;
-            }
-            for window in kfs.windows(2) {
-                let kf1 = window[0];
-                let kf2 = window[1];
-                if clip_time >= kf1.0 && clip_time <= kf2.0 {
-                    let progress = (clip_time - kf1.0) / (kf2.0 - kf1.0);
-                    return [
-                        kf1.1[0] + progress * (kf2.1[0] - kf1.1[0]),
-                        kf1.1[1] + progress * (kf2.1[1] - kf1.1[1]),
-                        kf1.1[2] + progress * (kf2.1[2] - kf1.1[2]),
-                        kf1.1[3] + progress * (kf2.1[3] - kf1.1[3]),
-                    ];
+
+            // Iterate over windows of 2
+            for i in 0..arr.len() - 1 {
+                if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
+                    if clip_time >= t1 && clip_time <= t2 {
+                        let progress = (clip_time - t1) / (t2 - t1).max(0.0001);
+                        return [
+                            v1[0] + progress * (v2[0] - v1[0]),
+                            v1[1] + progress * (v2[1] - v1[1]),
+                            v1[2] + progress * (v2[2] - v1[2]),
+                            v1[3] + progress * (v2[3] - v1[3]),
+                        ];
+                    }
                 }
             }
         }

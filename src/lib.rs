@@ -11,6 +11,7 @@
 //! - [`engine`] — Owns the GPU render pipeline: texture management, shader dispatch, and CPU readback.
 
 pub mod config;
+pub mod download;
 pub mod engine;
 pub mod layout;
 pub mod upload;

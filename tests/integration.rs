@@ -5,43 +5,7 @@ use serde::Deserialize;
 
 use render_poc::config::{RenderSpec, ClipType};
 
-fn fetch_remote_url(url: &str) -> String {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return url.to_string();
-    }
-    let cache_dir = Path::new("target/cache");
-    if !cache_dir.exists() {
-        std::fs::create_dir_all(cache_dir).expect("Failed to create cache dir");
-    }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&url, &mut hasher);
-    use std::hash::Hasher;
-    let hash = hasher.finish();
 
-    let clean_url_path = url.split('?').next().unwrap_or(url);
-    let extension = Path::new(clean_url_path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("bin");
-
-    let cache_path = cache_dir.join(format!("{}.{}", hash, extension));
-    if cache_path.exists() {
-        return cache_path.to_string_lossy().to_string();
-    }
-
-    let status = Command::new("curl")
-        .arg("-L")
-        .arg("-s")
-        .arg("-f")
-        .arg("-o")
-        .arg(&cache_path)
-        .arg(url)
-        .status()
-        .expect("Failed to execute curl");
-
-    assert!(status.success(), "Failed to download remote test URL: {}", url);
-    cache_path.to_string_lossy().to_string()
-}
 
 fn run_test_case(spec_name: &str) {
     let spec_path = format!("test_cases/{}", spec_name);
@@ -103,7 +67,7 @@ fn run_test_case(spec_name: &str) {
     // Load input image and resize to match spec composition
     let in_resized = if let Some(mut input_path) = spec.get_input_path() {
         if input_path.starts_with("http://") || input_path.starts_with("https://") {
-            input_path = fetch_remote_url(&input_path);
+            input_path = render_poc::download::fetch_remote_url(&input_path).expect("Failed to fetch remote test asset");
         }
         let in_img = image::open(&input_path).expect("Failed to open input image");
         in_img.resize_exact(spec.composition.width, spec.composition.height, image::imageops::FilterType::Nearest)
