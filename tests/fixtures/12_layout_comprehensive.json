@@ -8,15 +8,15 @@
     "duration": 8.0
   },
   "assets": {
-    "gt_canon": {
+    "inter": {
       "type": "font",
       "provider": "local",
-      "path": "fonts/GT-Canon-VF.ttf"
+      "path": "library/fonts/Inter-VF.ttf"
     },
-    "gt_canon_italic": {
+    "inter_italic": {
       "type": "font",
       "provider": "local",
-      "path": "fonts/GT-Canon-Italic-VF.ttf"
+      "path": "library/fonts/Inter-VF.ttf"
     }
   },
   "tracks": [
@@ -48,7 +48,7 @@
                 {
                   "type": "text",
                   "text": "VStack Alignment Focus",
-                  "font": "gt_canon",
+                  "font": "inter",
                   "font_size": 72.0,
                   "color": [0.95, 0.9, 0.2, 1.0],
                   "alignment": "center"
@@ -60,7 +60,7 @@
                 {
                   "type": "text",
                   "text": "This vertical layout verifies padding at the edges, center alignment, and line wrapping for paragraphs. If wrapping works, this text will fit comfortably inside the 1080px width container without any clipping.",
-                  "font": "gt_canon_italic",
+                  "font": "inter_italic",
                   "font_size": 44.0,
                   "color": [1.0, 1.0, 1.0, 0.9],
                   "alignment": "center"
@@ -71,7 +71,7 @@
                 {
                   "type": "text",
                   "text": "Footer Text",
-                  "font": "gt_canon",
+                  "font": "inter",
                   "font_size": 36.0,
                   "color": [0.6, 0.6, 0.6, 1.0],
                   "alignment": "center"
@@ -105,7 +105,7 @@
                 {
                   "type": "text",
                   "text": "HStack Spacing & Alignment",
-                  "font": "gt_canon",
+                  "font": "inter",
                   "font_size": 64.0,
                   "color": [0.95, 0.9, 0.2, 1.0],
                   "alignment": "center"
@@ -121,7 +121,7 @@
                     {
                       "type": "text",
                       "text": "Left Col",
-                      "font": "gt_canon_italic",
+                      "font": "inter_italic",
                       "font_size": 48.0,
                       "color": [1.0, 1.0, 1.0, 0.9],
                       "alignment": "left"
@@ -133,7 +133,7 @@
                     {
                       "type": "text",
                       "text": "Right Col",
-                      "font": "gt_canon_italic",
+                      "font": "inter_italic",
                       "font_size": 48.0,
                       "color": [0.3, 0.8, 1.0, 0.9],
                       "alignment": "right"
@@ -151,7 +151,7 @@
                     {
                       "type": "text",
                       "text": "A",
-                      "font": "gt_canon",
+                      "font": "inter",
                       "font_size": 40.0,
                       "color": [1.0, 0.3, 0.3, 1.0]
                     },
@@ -161,7 +161,7 @@
                     {
                       "type": "text",
                       "text": "B",
-                      "font": "gt_canon",
+                      "font": "inter",
                       "font_size": 40.0,
                       "color": [0.3, 1.0, 0.3, 1.0]
                     },
@@ -171,7 +171,7 @@
                     {
                       "type": "text",
                       "text": "C",
-                      "font": "gt_canon",
+                      "font": "inter",
                       "font_size": 40.0,
                       "color": [0.3, 0.3, 1.0, 1.0]
                     }
@@ -206,7 +206,7 @@
                 {
                   "type": "text",
                   "text": "ZStack Layering Focus",
-                  "font": "gt_canon",
+                  "font": "inter",
                   "font_size": 64.0,
                   "color": [0.95, 0.9, 0.2, 1.0],
                   "alignment": "center"
@@ -221,7 +221,7 @@
                     {
                       "type": "text",
                       "text": "SHADOW EFFECT",
-                      "font": "gt_canon",
+                      "font": "inter",
                       "font_size": 88.0,
                       "color": [0.3, 0.3, 0.3, 0.5],
                       "alignment": "center"
@@ -229,7 +229,7 @@
                     {
                       "type": "text",
                       "text": "SHADOW EFFECT",
-                      "font": "gt_canon",
+                      "font": "inter",
                       "font_size": 88.0,
                       "color": [1.0, 0.3, 0.3, 1.0],
                       "alignment": "center",
@@ -249,7 +249,7 @@
                     {
                       "type": "text",
                       "text": "Top-Left Overlay Info",
-                      "font": "gt_canon_italic",
+                      "font": "inter_italic",
                       "font_size": 44.0,
                       "color": [1.0, 1.0, 1.0, 0.95]
                     }
@@ -284,7 +284,7 @@
                 {
                   "type": "text",
                   "text": "Nested Layout Matrix",
-                  "font": "gt_canon",
+                  "font": "inter",
                   "font_size": 64.0,
                   "color": [0.95, 0.9, 0.2, 1.0],
                   "alignment": "center"
@@ -306,14 +306,14 @@
                         {
                           "type": "text",
                           "text": "Item 1",
-                          "font": "gt_canon_italic",
+                          "font": "inter_italic",
                           "font_size": 40.0,
                           "color": [1.0, 1.0, 1.0, 1.0]
                         },
                         {
                           "type": "text",
                           "text": "Item 2",
-                          "font": "gt_canon_italic",
+                          "font": "inter_italic",
                           "font_size": 40.0,
                           "color": [1.0, 1.0, 1.0, 1.0]
                         }
@@ -330,14 +330,14 @@
                         {
                           "type": "text",
                           "text": "Item A",
-                          "font": "gt_canon_italic",
+                          "font": "inter_italic",
                           "font_size": 40.0,
                           "color": [0.3, 0.8, 1.0, 1.0]
                         },
                         {
                           "type": "text",
                           "text": "Item B",
-                          "font": "gt_canon_italic",
+                          "font": "inter_italic",
                           "font_size": 40.0,
                           "color": [0.3, 0.8, 1.0, 1.0]
                         }
@@ -351,7 +351,7 @@
                 {
                   "type": "text",
                   "text": "Dynamic Weight:",
-                  "font": "gt_canon",
+                  "font": "inter",
                   "font_size": 48.0,
                   "color": [1.0, 1.0, 1.0, 1.0],
                   "alignment": "center"
@@ -359,7 +359,7 @@
                 {
                   "type": "text",
                   "text": "VARIABLE WEIGHT TEXT",
-                  "font": "gt_canon",
+                  "font": "inter",
                   "font_size": 56.0,
                   "color": [1.0, 1.0, 1.0, 1.0],
                   "alignment": "center",

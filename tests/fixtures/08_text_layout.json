@@ -12,15 +12,15 @@
       "type": "image",
       "path": "input.jpg"
     },
-    "gt_canon": {
+    "inter": {
       "type": "font",
       "provider": "local",
-      "path": "fonts/GT-Canon-VF.ttf"
+      "path": "library/fonts/Inter-VF.ttf"
     },
-    "gt_canon_italic": {
+    "inter_italic": {
       "type": "font",
       "provider": "local",
-      "path": "fonts/GT-Canon-Italic-VF.ttf"
+      "path": "library/fonts/Inter-VF.ttf"
     }
   },
   "tracks": [
@@ -53,7 +53,7 @@
                 {
                   "type": "text",
                   "text": "GT Canon Variable Font",
-                  "font": "gt_canon",
+                  "font": "inter",
                   "font_size": 48.0,
                   "color": [0.9, 0.8, 0.2, 1.0],
                   "alignment": "center",
@@ -70,7 +70,7 @@
                 {
                   "type": "text",
                   "text": "This text should wrap automatically because the layout engine handles width constraints and line breaks dynamically.",
-                  "font": "gt_canon_italic",
+                  "font": "inter_italic",
                   "font_size": 32.0,
                   "color": [1.0, 1.0, 1.0, 0.9],
                   "alignment": "center"

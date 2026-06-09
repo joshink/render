@@ -5,7 +5,6 @@ use render_poc::engine::{EngineParams, RenderContext, TransitionEngineParams};
 use render_poc::upload::{upload_signed_url, upload_s3, upload_gcs};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::env;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::process::{Command, Stdio};
@@ -491,6 +490,76 @@ fn get_resident_set_size() -> Option<usize> {
     None
 }
 
+/// Resolves the absolute or relative path to the `library/` folder.
+/// Checks RENDER_LIBRARY_PATH environment variable first, then fallback directories.
+fn get_library_path() -> std::path::PathBuf {
+    // 1. Check environment variable
+    if let Ok(path_str) = std::env::var("RENDER_LIBRARY_PATH") {
+        let env_path = std::path::PathBuf::from(path_str);
+        if env_path.exists() && env_path.is_dir() {
+            return env_path;
+        }
+    }
+
+    // 2. Check current working directory ./library
+    let cwd_lib = std::path::Path::new("library");
+    if cwd_lib.exists() && cwd_lib.is_dir() && cwd_lib.join("compositor.wgsl").exists() {
+        return cwd_lib.to_path_buf();
+    }
+
+    // 3. Check relative to executable path (walking up parent directories)
+    if let Ok(exe_path) = std::env::current_exe() {
+        let mut dir = exe_path.parent();
+        while let Some(parent) = dir {
+            let lib_path = parent.join("library");
+            if lib_path.exists() && lib_path.is_dir() && lib_path.join("compositor.wgsl").exists() {
+                return lib_path;
+            }
+            dir = parent.parent();
+        }
+    }
+
+    // Fallback to relative path in current directory
+    std::path::PathBuf::from("library")
+}
+
+/// Resolves a resource path relative to the library directory if it does not exist at CWD.
+fn resolve_asset_path(path: &str) -> std::path::PathBuf {
+    let raw_path = std::path::PathBuf::from(path);
+    if raw_path.exists() {
+        return raw_path;
+    }
+
+    let lib_path = get_library_path();
+
+    // Try relative to library path
+    let try_lib = lib_path.join(path);
+    if try_lib.exists() {
+        return try_lib;
+    }
+
+    // If path starts with "library/", strip it and join with lib_path
+    if path.starts_with("library/") {
+        let stripped = &path["library/".len()..];
+        let try_stripped = lib_path.join(stripped);
+        if try_stripped.exists() {
+            return try_stripped;
+        }
+    }
+
+    // If path starts with "fonts/", strip it and join with lib_path/fonts/
+    if path.starts_with("fonts/") {
+        let stripped = &path["fonts/".len()..];
+        let try_font = lib_path.join("fonts").join(stripped);
+        if try_font.exists() {
+            return try_font;
+        }
+    }
+
+    // Default to the original path
+    raw_path
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 const CUSTOM_PARAMS_BUFFER_SIZE: u64 = 1024;
@@ -695,8 +764,10 @@ fn compile_pipelines(
     spec: &RenderSpec,
     args: &CliArgs,
 ) -> PipelineSet {
-    // Note: compositor.wgsl path is hardcoded here and depends on the application's working directory.
-    let compositor_shader_str = std::fs::read_to_string("src/compositor.wgsl").expect("Failed to read compositor.wgsl");
+    let lib_path = get_library_path();
+    let compositor_path = lib_path.join("compositor.wgsl");
+    let compositor_shader_str = std::fs::read_to_string(&compositor_path)
+        .unwrap_or_else(|_| panic!("Failed to read compositor.wgsl from {:?}", compositor_path));
     let compositor_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Compositor Shader"),
         source: wgpu::ShaderSource::Wgsl(compositor_shader_str.into()),
@@ -909,8 +980,8 @@ fn compile_pipelines(
 
     // Scan default directories "library/effects/" and "library/transitions/" and --include paths
     let mut wgsl_files = Vec::new();
-    collect_wgsl_files(std::path::Path::new("library/effects"), &mut wgsl_files);
-    collect_wgsl_files(std::path::Path::new("library/transitions"), &mut wgsl_files);
+    collect_wgsl_files(&lib_path.join("effects"), &mut wgsl_files);
+    collect_wgsl_files(&lib_path.join("transitions"), &mut wgsl_files);
     for path in &args.include_paths {
         collect_wgsl_files(path, &mut wgsl_files);
     }
@@ -1024,7 +1095,8 @@ fn compile_pipelines(
     for (asset_id, asset) in &spec.assets {
         if let Asset::Shader { path } = asset {
             if !custom_shader_pipelines.contains_key(asset_id) {
-                let shader_str = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Failed to read shader {}", path));
+                let resolved_path = resolve_asset_path(path);
+                let shader_str = std::fs::read_to_string(&resolved_path).unwrap_or_else(|_| panic!("Failed to read shader {:?}", resolved_path));
                 
                 if let Some(metadata_str) = extract_transition_metadata(&shader_str) {
                     if let Ok(meta) = serde_json::from_str::<TransitionMetadata>(&metadata_str) {
@@ -1363,11 +1435,12 @@ fn main() {
     let mut font_assets = HashMap::new();
     for (asset_id, asset) in &spec.assets {
         if let Asset::Font { path, .. } = asset {
-            let bytes = std::fs::read(path).unwrap_or_else(|e| {
-                error!("Failed to read font file '{}': {:?}", path, e);
+            let resolved_path = resolve_asset_path(path);
+            let bytes = std::fs::read(&resolved_path).unwrap_or_else(|e| {
+                error!("Failed to read font file '{:?}': {:?}", resolved_path, e);
                 Vec::new()
             });
-            info!("Loaded font asset '{}' from {}", asset_id, path);
+            info!("Loaded font asset '{}' from {:?}", asset_id, resolved_path);
             font_assets.insert(asset_id.clone(), bytes);
         }
     }

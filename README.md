@@ -125,6 +125,26 @@ cd render
 cargo build --release
 ```
 
+Alternatively, you can install the binary globally on your system:
+
+```bash
+cargo install --path .
+```
+
+#### What Happens When Installing the Binary (Asset Resolution)
+Because Rust binaries do not automatically bundle external directories/assets at compile time, the installed `render` command must resolve dynamically loaded parts (such as the compositor shader `compositor.wgsl`, transition/effect shaders, and font assets).
+
+The engine dynamically resolves the `library/` folder using the following priority order:
+1. **`RENDER_LIBRARY_PATH` Environment Variable**: If set, the engine loads all assets directly from this directory.
+   ```bash
+   export RENDER_LIBRARY_PATH="/absolute/path/to/render/library"
+   ```
+2. **Current Working Directory**: Checks if `./library/` exists in the directory where the binary is executed.
+3. **Executable Directory**: Traverses up parent directories starting from the binary's location to find a `library/` folder. This is useful when executing a built binary directly from the target folder during development.
+
+> [!WARNING]
+> If you run the installed binary from a different directory without setting `RENDER_LIBRARY_PATH`, the compositor shader and fonts will fail to load. Always set the environment variable or ensure the `library/` folder is placed in one of the lookup paths.
+
 ### Running the PoC
 
 Execute the binary on the default proof-of-concept spec. This loads the test input image `input.jpg`, applies a grayscale color conversion and brightness boost via compute shaders, and saves the output to `output.png`:
@@ -165,7 +185,7 @@ Compositions are defined using a declarative JSON spec. Below is a sample showca
     "custom_font": {
       "type": "font",
       "provider": "file",
-      "path": "fonts/GT-Canon-VF.ttf"
+      "path": "library/fonts/GT-Canon-VF.ttf"
     }
   },
   "tracks": [

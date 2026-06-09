@@ -12,15 +12,15 @@
       "type": "image",
       "path": "input.jpg"
     },
-    "gt_canon": {
+    "inter": {
       "type": "font",
       "provider": "local",
-      "path": "fonts/GT-Canon-VF.ttf"
+      "path": "library/fonts/Inter-VF.ttf"
     },
-    "gt_canon_italic": {
+    "inter_italic": {
       "type": "font",
       "provider": "local",
-      "path": "fonts/GT-Canon-Italic-VF.ttf"
+      "path": "library/fonts/Inter-VF.ttf"
     }
   },
   "tracks": [
@@ -54,18 +54,24 @@
                 {
                   "type": "text",
                   "text": "ANIMATED TEXT",
-                  "font": "gt_canon",
-                  "font_size": 64.0,
+                  "font": "inter",
+                  "font_size": 72.0,
                   "color": [1.0, 0.9, 0.1, 1.0],
-                  "alignment": "center"
+                  "alignment": "center",
+                  "axes": {
+                    "wght": 800.0
+                  }
                 },
                 {
                   "type": "text",
                   "text": "Transitions are beautiful.",
-                  "font": "gt_canon_italic",
-                  "font_size": 36.0,
+                  "font": "inter_italic",
+                  "font_size": 48.0,
                   "color": [1.0, 1.0, 1.0, 1.0],
-                  "alignment": "center"
+                  "alignment": "center",
+                  "axes": {
+                    "wght": 800.0
+                  }
                 }
               ]
             },

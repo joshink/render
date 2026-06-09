@@ -52,6 +52,16 @@ The binary exits with one of the following codes depending on the render outcome
 *   `3`: Shader compile error (e.g. custom WGSL syntax error, bind-group mismatch).
 *   `4`: Runtime execution error (e.g. GPU out of memory, FFmpeg write pipe failure).
 
+### 2.4. Library & Asset Resolution
+
+Because the binary loads dynamic resources (such as the main compositor shader, transition and effect shader catalogs, and font files) at runtime, it relies on locating the `library/` folder. The engine searches for this directory in the following order:
+
+1. **`RENDER_LIBRARY_PATH` Environment Variable**: If defined, the engine uses this folder directly.
+2. **Current Working Directory**: Checks for `./library` relative to where the binary is executed.
+3. **Executable Path**: Resolves relative to the location of the binary itself, traversing up parent directories (useful for development builds and local installations).
+
+If the library is not found, the rendering engine exits with a Resource resolution error (`2`).
+
 ---
 
 ## 3. Render Specification Schema (JSON)
@@ -82,7 +92,7 @@ The render specification is a declarative JSON structure representing a single t
     "custom_font": {
       "type": "font",
       "provider": "file",
-      "path": "fonts/RobotoFlex.ttf"
+      "path": "library/fonts/RobotoFlex.ttf"
     },
     "wave_shader": {
       "type": "shader",
