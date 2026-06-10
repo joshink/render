@@ -70,6 +70,168 @@ pub fn upload_signed_url(local_path: &str, url: &str) -> Result<(), String> {
     }
 }
 
+/// Encodes bytes as standard (RFC 4648) base64. Used to build the HTTP Basic
+/// auth header for the Mux API. Implemented inline to avoid pulling base64 in
+/// as a direct dependency.
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { TABLE[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+/// Uploads a local video file to Mux Video using the Direct Uploads API.
+///
+/// Flow:
+///   1. `POST /video/v1/uploads` (HTTP Basic auth with the Mux API token)
+///      creates a direct upload and returns a one-time signed PUT URL.
+///   2. The rendered file is streamed to that URL via PUT — identical in spirit
+///      to [`upload_signed_url`], but Mux ingests and transcodes it into an asset.
+///
+/// After the PUT, fetches the upload once more to read the `asset_id` Mux
+/// assigns on ingest and prints it to stdout. Asset *processing* (preparing →
+/// ready) is left to the caller to poll. Mux only ingests video, so non-`.mp4`
+/// outputs are rejected up front.
+pub fn upload_mux(
+    local_path: &str,
+    token_id: Option<String>,
+    token_secret: Option<String>,
+) -> Result<(), String> {
+    if !local_path.ends_with(".mp4") {
+        return Err(format!(
+            "Mux only ingests video; got '{}'. Use an .mp4 output (mux:// implies video).",
+            local_path
+        ));
+    }
+
+    let resolved_id = token_id
+        .or_else(|| std::env::var("MUX_TOKEN_ID").ok())
+        .ok_or_else(|| "Mux token ID not found in spec output credentials, CLI flags, or MUX_TOKEN_ID.".to_string())?;
+    let resolved_secret = token_secret
+        .or_else(|| std::env::var("MUX_TOKEN_SECRET").ok())
+        .ok_or_else(|| "Mux token secret not found in spec output credentials, CLI flags, or MUX_TOKEN_SECRET.".to_string())?;
+
+    let auth = format!(
+        "Basic {}",
+        base64_encode(format!("{}:{}", resolved_id, resolved_secret).as_bytes())
+    );
+
+    // 1. Create a direct upload. Mux responds with a one-time signed PUT URL.
+    // ureq's `json` feature is not enabled, so serialize/parse via serde_json.
+    log::info!("Creating Mux direct upload...");
+    let create_body = serde_json::json!({
+        "cors_origin": "*",
+        "new_asset_settings": { "playback_policy": ["public"] }
+    })
+    .to_string();
+
+    let create_resp = match ureq::post("https://api.mux.com/video/v1/uploads")
+        .set("Authorization", &auth)
+        .set("Content-Type", "application/json")
+        .send_string(&create_body)
+    {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            return Err(format!("Mux create-upload failed with status code {}: {}", code, body));
+        }
+        Err(e) => return Err(format!("HTTP transport error creating Mux upload: {}", e)),
+    };
+
+    let resp_body = create_resp
+        .into_string()
+        .map_err(|e| format!("Failed to read Mux create-upload response: {}", e))?;
+    let json: serde_json::Value = serde_json::from_str(&resp_body)
+        .map_err(|e| format!("Failed to parse Mux create-upload response: {}", e))?;
+
+    let put_url = json["data"]["url"]
+        .as_str()
+        .ok_or_else(|| format!("Mux create-upload response missing data.url: {}", json))?
+        .to_string();
+    let upload_id = json["data"]["id"].as_str().unwrap_or("unknown").to_string();
+
+    // 2. Stream the rendered file to the signed PUT URL. ureq sends the File
+    // handle directly so large videos never sit fully in memory.
+    log::info!("Uploading video to Mux (upload id: {})...", upload_id);
+    let file = File::open(local_path)
+        .map_err(|e| format!("Failed to open local file {}: {}", local_path, e))?;
+
+    match ureq::put(&put_url).set("Content-Type", "video/mp4").send(file) {
+        Ok(response) => {
+            log::info!("Mux upload successful. Status code: {}", response.status());
+        }
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            return Err(format!("Mux upload PUT failed with status code {}: {}", code, body));
+        }
+        Err(e) => return Err(format!("HTTP transport error uploading to Mux: {}", e)),
+    }
+
+    // 3. Mux creates the asset asynchronously after ingest, so the upload's
+    // asset_id is not populated until shortly after the PUT. Re-fetch the
+    // upload a few times to read it, then print it. We deliberately do NOT wait
+    // for the asset to finish processing — the caller polls the asset itself.
+    match fetch_mux_asset_id(&auth, &upload_id) {
+        Some(asset_id) => {
+            log::info!("Mux asset created: {}", asset_id);
+            println!("{}", asset_id);
+        }
+        None => {
+            log::warn!(
+                "Mux upload {} accepted, but asset_id not yet assigned. \
+                 Poll GET /video/v1/uploads/{} to retrieve it.",
+                upload_id, upload_id
+            );
+            // Fall back to the upload id so the caller has a handle to poll.
+            println!("upload:{}", upload_id);
+        }
+    }
+
+    Ok(())
+}
+
+/// Polls `GET /video/v1/uploads/{id}` a bounded number of times to read the
+/// `asset_id` Mux assigns once it begins ingesting the upload. Returns `None`
+/// if it is still unassigned after the retry budget (asset creation is usually
+/// near-instant, but the API is eventually-consistent).
+fn fetch_mux_asset_id(auth: &str, upload_id: &str) -> Option<String> {
+    let url = format!("https://api.mux.com/video/v1/uploads/{}", upload_id);
+    for attempt in 0..10 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+        let resp = match ureq::get(&url).set("Authorization", auth).call() {
+            Ok(resp) => resp,
+            Err(e) => {
+                log::warn!("Mux upload status check failed (attempt {}): {}", attempt + 1, e);
+                continue;
+            }
+        };
+        let body = match resp.into_string() {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let json: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        if let Some(asset_id) = json["data"]["asset_id"].as_str() {
+            return Some(asset_id.to_string());
+        }
+    }
+    None
+}
+
 pub fn upload_s3(
     local_path: &str,
     dest: &str,
@@ -208,5 +370,26 @@ mod tests {
 
         assert!(parse_gs_uri("gs://gcs-bucket-name").is_err());
         assert!(parse_gs_uri("s3://bucket/key").is_err());
+    }
+
+    #[test]
+    fn test_base64_encode() {
+        // Standard RFC 4648 vectors, including the padding edge cases.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // Mux Basic auth shape: "token_id:token_secret".
+        assert_eq!(base64_encode(b"id:secret"), "aWQ6c2VjcmV0");
+    }
+
+    #[test]
+    fn test_mux_rejects_non_video() {
+        let res = upload_mux("output.png", Some("id".into()), Some("secret".into()));
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Mux only ingests video"));
     }
 }

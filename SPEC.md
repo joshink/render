@@ -128,7 +128,7 @@ spec are first tried as-is, then resolved relative to `library/` (with
 | Field | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
 | `path` | string | yes | Destination path or URL. |
-| `credentials` | object | no | `{ "key", "secret", "region" }`, all optional. Used for `s3://` / `gs://` uploads; CLI credential flags act as fallbacks. |
+| `credentials` | object | no | `{ "key", "secret", "region" }`, all optional. Used for `s3://` / `gs://` / `mux://` uploads; CLI credential flags act as fallbacks. For `mux://`, `key` is the Mux token ID and `secret` is the Mux token secret. |
 
 The output **target** is chosen by the scheme of the path:
 
@@ -136,10 +136,12 @@ The output **target** is chosen by the scheme of the path:
 * `s3://bucket/key` — uploaded to S3 (credentials from `credentials`, then `--aws-*`).
 * `gs://bucket/key` — uploaded to Google Cloud Storage (credentials from `credentials`, then `--gcs-*`).
 * `http://…` / `https://…` — uploaded with an HTTP `PUT` (signed-URL style).
+* `mux://` — uploaded to [Mux Video](https://mux.com) via the Direct Uploads API. The engine creates a one-time signed upload, `PUT`s the video to it, then prints the resulting Mux **asset ID** to stdout. It does not wait for the asset to finish processing — poll the asset (`GET /video/v1/assets/{id}`) yourself for `ready` status and playback IDs. Credentials come from `credentials` (`key` = token ID, `secret` = token secret), then `--mux-token-id` / `--mux-token-secret`, then `MUX_TOKEN_ID` / `MUX_TOKEN_SECRET`. The path after `mux://` is ignored — Mux assigns the asset ID.
 
 The output **format** is chosen by the path's file extension, ignoring any query
 string: `.mp4` produces a video; any other extension (`.png`, `.jpg`) produces a
-single still rendered at timeline `t = 0`.
+single still rendered at timeline `t = 0`. The `mux://` scheme always implies a
+video (Mux does not ingest stills).
 
 ### 3.3 Composition
 

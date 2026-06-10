@@ -212,9 +212,10 @@ clips support `trim_start` and per-clip offsets, muxed via FFmpeg at unity gain.
 ### ☁️ Remote assets & cloud upload
 
 Any asset `path` may be an `https://` URL — it's downloaded and cached
-automatically. The `output` may target the local disk, `s3://`, `gs://`, or a
-signed `https://` PUT URL, with credentials from the spec or CLI flags. →
-[Output](./SPEC.md#32-output), [Assets](./SPEC.md#34-assets)
+automatically. The `output` may target the local disk, `s3://`, `gs://`, a
+signed `https://` PUT URL, or `mux://` (uploaded straight to [Mux Video](https://mux.com)
+via its Direct Uploads API), with credentials from the spec, CLI flags, or
+environment. → [Output](./SPEC.md#32-output), [Assets](./SPEC.md#34-assets)
 
 ### ⚙️ CLI overrides
 

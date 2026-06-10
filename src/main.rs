@@ -2,7 +2,7 @@ use log::{LevelFilter, error, info};
 use render_poc::config::*;
 use render_poc::download::fetch_remote_url;
 use render_poc::engine::{EngineParams, RenderContext, Timeline, TransitionEngineParams};
-use render_poc::upload::{upload_signed_url, upload_s3, upload_gcs};
+use render_poc::upload::{upload_signed_url, upload_s3, upload_gcs, upload_mux};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::File;
@@ -58,6 +58,8 @@ struct CliArgs {
     aws_secret: Option<String>,
     gcs_key: Option<String>,
     gcs_secret: Option<String>,
+    mux_token_id: Option<String>,
+    mux_token_secret: Option<String>,
 }
 
 #[derive(clap::Parser, Debug)]
@@ -114,6 +116,14 @@ struct Opts {
     #[arg(long = "gcs-secret")]
     gcs_secret: Option<String>,
 
+    /// Mux API token ID override (for mux:// outputs)
+    #[arg(long = "mux-token-id")]
+    mux_token_id: Option<String>,
+
+    /// Mux API token secret override (for mux:// outputs)
+    #[arg(long = "mux-token-secret")]
+    mux_token_secret: Option<String>,
+
     /// Set an arbitrary override in key=value format
     #[arg(long = "set")]
     set: Vec<String>,
@@ -166,6 +176,8 @@ fn parse_args() -> CliArgs {
         aws_secret: opts.aws_secret,
         gcs_key: opts.gcs_key,
         gcs_secret: opts.gcs_secret,
+        mux_token_id: opts.mux_token_id,
+        mux_token_secret: opts.mux_token_secret,
     }
 }
 
@@ -1195,9 +1207,12 @@ fn run_render_loop(
     let is_remote = dest_path.starts_with("s3://")
         || dest_path.starts_with("gs://")
         || dest_path.starts_with("http://")
-        || dest_path.starts_with("https://");
+        || dest_path.starts_with("https://")
+        || dest_path.starts_with("mux://");
 
-    let is_movie = spec.output.clean_path().ends_with(".mp4");
+    // Mux only ingests video, so a mux:// destination always implies an .mp4
+    // render regardless of the (path-less) scheme.
+    let is_movie = dest_path.starts_with("mux://") || spec.output.clean_path().ends_with(".mp4");
 
     let render_output_path = if is_remote {
         let temp_dir = std::env::temp_dir();
@@ -1337,6 +1352,13 @@ fn run_render_loop(
                 (args.gcs_key.clone(), args.gcs_secret.clone(), None)
             };
             upload_gcs(&render_output_path, dest_path, key, secret, region)
+        } else if dest_path.starts_with("mux://") {
+            let (token_id, token_secret) = if let Some(creds) = spec.output.credentials() {
+                (creds.key.clone().or_else(|| args.mux_token_id.clone()), creds.secret.clone().or_else(|| args.mux_token_secret.clone()))
+            } else {
+                (args.mux_token_id.clone(), args.mux_token_secret.clone())
+            };
+            upload_mux(&render_output_path, token_id, token_secret)
         } else {
             Err(format!("Unsupported remote scheme in output: {}", dest_path))
         };
