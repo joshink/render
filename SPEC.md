@@ -1,158 +1,601 @@
-# Render Video Engine: External Interface Specification
+# Render — Input & Interface Specification
 
-This document provides the official external interface specification for the **Render** headless video rendering engine. It defines the command-line interface (CLI) options, the input JSON specification schema, the dynamic expression syntax, and the expected media outputs.
+This document is the formal, normative specification for the **Render** engine's
+external interface. It defines:
+
+1. The command-line interface (arguments, overrides, exit behaviour).
+2. The render specification — the JSON document that describes a composition.
+3. The dynamic value system (literals, keyframes, and the expression DSL).
+4. The built-in effect, transition, and shader catalogs.
+5. The output formats and the debug-run layout.
+
+The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **MAY**, and
+**OPTIONAL** are used in the sense of RFC 2119.
+
+Unless stated otherwise, every numeric field is a [Dynamic Value](#4-dynamic-values)
+— it accepts a constant, a keyframe array, or an expression object
+interchangeably.
 
 ---
 
 ## 1. System Overview
 
-The **Render** engine is a headless, GPU-accelerated utility designed to process declarative timeline configurations and compile them into static images or compressed video streams. 
+Render is a headless, GPU-accelerated engine. It reads a single declarative JSON
+specification, resolves its assets, evaluates the timeline frame-by-frame on the
+GPU (via WebGPU / `wgpu` compute pipelines), and writes a static image or an
+H.264/AAC video.
 
 ```
-┌─────────────────┐
-│  CLI Invocation │──┐
-└─────────────────┘  │
-                     ▼
-┌─────────────────┐     ┌──────────────────────┐     ┌────────────────┐
-│ Input JSON Spec │────>│ Video Render Engine  │────>│  Compiled Video│
-└─────────────────┘     │       (wgpu)         │     │   or Images    │
-                     ▲  └──────────────────────┘     └────────────────┘
-┌─────────────────┐  │
-│  Media Assets   │──┘
-└─────────────────┘
+  spec.json ─┐
+             ├─▶ Render engine (wgpu) ─▶ output.png / output.mp4 ─▶ [local | S3 | GCS | signed URL]
+  assets ────┘
 ```
 
 ---
 
-## 2. Command-Line Interface (CLI)
+## 2. Command-Line Interface
 
-The rendering engine is executed as a command-line binary. The interface supports configuration parsing, include-path resolution, and diagnostic debugging.
+### 2.1 Synopsis
 
-### 2.1. Invocation Syntax
-```bash
+```
 render-poc [OPTIONS] <SPEC_PATH>
 ```
 
-### 2.2. Options and Arguments
+The binary is named `render-poc`. Exactly one render specification is processed
+per invocation.
 
-| Flag / Option | Argument Type | Description |
-| :--- | :--- | :--- |
-| `<SPEC_PATH>` | Position / String | (Required) Path to the JSON file defining the render specification. |
-| `-i`, `--input` | String | Alternative syntax to specify the path to the input JSON file. |
-| `--debug` | Directory Path | (Optional) Enables debug mode and exports frames and execution logs to the specified directory. |
-| `-I`, `--include` | Path | (Optional, repeatable) Directory or file path to scan for additional custom `.wgsl` shaders. |
+### 2.2 Options
 
-### 2.3. Exit Codes
+| Flag | Argument | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `<SPEC_PATH>` | path | yes¹ | Positional path to the JSON spec. |
+| `-i`, `--input` | path | yes¹ | Alternative to the positional argument. Takes precedence if both are given. |
+| `--debug` | dir | no | Enables debug mode; writes a timestamped run folder under `dir` (see §6.2). |
+| `-I`, `--include` | path | no | Extra directory or `.wgsl` file to scan for custom shaders. Repeatable. |
+| `-o`, `--output` | string | no | Overrides the spec's `output` path. |
+| `--width` | int | no | Overrides `composition.width`. |
+| `--height` | int | no | Overrides `composition.height`. |
+| `--fps` | int | no | Overrides `composition.fps`. |
+| `--duration` | float | no | Overrides `composition.duration`. |
+| `--set` | `key=value` | no | Overrides an arbitrary dotted spec path (e.g. `--set composition.fps=60`). Repeatable. |
+| `--aws-key` | string | no | AWS access key id, used for `s3://` outputs. |
+| `--aws-secret` | string | no | AWS secret access key. |
+| `--gcs-key` | string | no | GCS HMAC access key, used for `gs://` outputs. |
+| `--gcs-secret` | string | no | GCS HMAC secret. |
 
-The binary exits with one of the following codes depending on the render outcome:
+¹ A spec path **MUST** be supplied either positionally or via `-i/--input`.
 
-*   `0`: Render completed successfully; outputs generated.
-*   `1`: Spec parse error (e.g. invalid JSON structure, mismatching types).
-*   `2`: Resource resolution error (e.g. missing asset files, invalid font provider).
-*   `3`: Shader compile error (e.g. custom WGSL syntax error, bind-group mismatch).
-*   `4`: Runtime execution error (e.g. GPU out of memory, FFmpeg write pipe failure).
+### 2.3 Overrides
 
-### 2.4. Library & Asset Resolution
+Overrides are applied to the raw JSON **before** deserialization, so they may
+introduce or replace any field. `--set key=value` splits on the first `=`; the
+key is a dot-separated path into the JSON object tree, and the value is coerced
+to an integer, float, boolean, `null`, or string (in that order). Quoted values
+(`"…"` or `'…'`) are always treated as strings. The convenience flags `-o`,
+`--width`, `--height`, `--fps`, and `--duration` are shorthand for the
+corresponding `--set` paths.
 
-Because the binary loads dynamic resources (such as the main compositor shader, transition and effect shader catalogs, and font files) at runtime, it relies on locating the `library/` folder. The engine searches for this directory in the following order:
+### 2.4 Exit Behaviour
 
-1. **`RENDER_LIBRARY_PATH` Environment Variable**: If defined, the engine uses this folder directly.
-2. **Current Working Directory**: Checks for `./library` relative to where the binary is executed.
-3. **Executable Path**: Resolves relative to the location of the binary itself, traversing up parent directories (useful for development builds and local installations).
+| Code | Meaning |
+| :--- | :--- |
+| `0` | Render completed and all outputs (including any remote upload) succeeded. |
+| `1` | A recoverable run error — most commonly a failed remote upload, or a missing spec path. |
+| non-zero (abort) | An unrecoverable error during spec parsing, asset/font/shader loading, or GPU setup. These currently surface as a Rust panic rather than a graceful exit. |
 
-If the library is not found, the rendering engine exits with a Resource resolution error (`2`).
+> **Note.** Granular per-stage exit codes are not yet implemented. Resource and
+> shader-compilation failures abort the process; only render-loop and upload
+> failures return the clean `1` code.
+
+### 2.5 Library & Asset Resolution
+
+Render loads dynamic resources at runtime: the compositor shader
+(`compositor.wgsl`), the built-in effect/transition shaders, and the bundled
+fonts. It locates the `library/` directory by checking, in order:
+
+1. **`RENDER_LIBRARY_PATH`** — if set and pointing at an existing directory, it
+   is used directly.
+2. **`./library`** — relative to the current working directory, if it contains
+   `compositor.wgsl`.
+3. **Executable-relative** — walking up parent directories from the binary's
+   location until a `library/` containing `compositor.wgsl` is found.
+
+If none match, the engine falls back to the literal path `library` and will
+abort when the compositor shader cannot be read. Asset paths declared in the
+spec are first tried as-is, then resolved relative to `library/` (with
+`library/` and `fonts/` prefixes stripped as needed).
 
 ---
 
-## 3. Render Specification Schema (JSON)
+## 3. Render Specification (JSON)
 
-The render specification is a declarative JSON structure representing a single timeline composition.
+### 3.1 Root Object
 
-### 3.1. Reference JSON Example
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `version` | string | yes | Schema version. Currently `"1.0"`. |
+| `output` | string \| [Output](#32-output) | yes | Destination. A bare string is the path; an object additionally carries credentials. |
+| `composition` | [Composition](#33-composition) | yes | Canvas dimensions and timing. |
+| `assets` | map<string, [Asset](#34-assets)> | yes | Named external resources, keyed by id. |
+| `tracks` | [Track](#35-tracks)[] | yes | Z-ordered visual layers (index `0` is the backmost). |
+| `presets` | [Preset](#310-presets)[] | no | Reusable compound effects. |
+| `audio_tracks` | [AudioTrack](#311-audio-tracks)[] | no | Parallel audio mix lanes. |
+
+### 3.2 Output
+
+`output` is either a string (the destination path) or an object:
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `path` | string | yes | Destination path or URL. |
+| `credentials` | object | no | `{ "key", "secret", "region" }`, all optional. Used for `s3://` / `gs://` uploads; CLI credential flags act as fallbacks. |
+
+The output **target** is chosen by the scheme of the path:
+
+* No scheme — written to the local filesystem.
+* `s3://bucket/key` — uploaded to S3 (credentials from `credentials`, then `--aws-*`).
+* `gs://bucket/key` — uploaded to Google Cloud Storage (credentials from `credentials`, then `--gcs-*`).
+* `http://…` / `https://…` — uploaded with an HTTP `PUT` (signed-URL style).
+
+The output **format** is chosen by the path's file extension, ignoring any query
+string: `.mp4` produces a video; any other extension (`.png`, `.jpg`) produces a
+single still rendered at timeline `t = 0`.
+
+### 3.3 Composition
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `width` | int | yes | Canvas width in pixels. |
+| `height` | int | yes | Canvas height in pixels. |
+| `fps` | int | yes | Frames per second (used for video output and frame indexing). |
+| `duration` | float | yes | Total composition length in seconds. |
+
+### 3.4 Assets
+
+`assets` maps a unique id to an asset definition. The `type` field is the
+discriminator.
+
+| `type` | Fields | Notes |
+| :--- | :--- | :--- |
+| `image` | `path` | Still image. |
+| `video` | `path` | Currently sampled as a still image for the visual track; its audio is usable via audio tracks. |
+| `audio` | `path` | Audio source for audio tracks. |
+| `shader` | `path` | A `.wgsl` file compiled into a custom effect/transition pipeline keyed by the asset id. |
+| `font` | `provider`, `path` | `provider` is one of `"file"`, `"system"`, `"url"`. |
+
+Any `path` beginning with `http://` or `https://` is downloaded and cached to a
+temporary file before use, for every asset type.
+
+### 3.5 Tracks
+
+A track is a Z-ordered layer holding a sequence of clips and optional
+transitions.
+
+| Field | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `id` | string | yes | — | Unique track id. |
+| `start` | float | no | `0.0` | Time offset (seconds) at which the track's first clip begins. |
+| `clips` | [Clip](#36-clips)[] | yes | — | Sequential clips. |
+| `transitions` | [Transition](#39-transitions)[] | no | `[]` | Transitions between clips on this track. |
+
+Clips on a single track are laid out **sequentially** and **MUST NOT** overlap.
+Each clip's absolute start is `track.start + Σ(previous durations) + Σ(offsets)`.
+To overlay content, place it on separate, higher-indexed tracks.
+
+### 3.6 Clips
+
+| Field | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `id` | string | yes | — | Unique clip id. |
+| `type` | enum | yes | — | `media`, `solid`, `text`, or `effect`. |
+| `duration` | float | yes | — | On-screen duration in seconds. |
+| `offset` | float | no | `0.0` | Non-negative gap before this clip starts, relative to the previous clip's end. |
+| `trim_start` | float | no | `0.0` | In-point within the source media, in seconds. |
+| `asset` | string | for `media` | — | Asset id to render. |
+| `scale_mode` | enum | no | `"fit"` | `fit`, `fill`, `natural`, or `stretch` (see §3.7). |
+| `solid_params` | object | for `solid` | — | `{ "color": [r,g,b,a] }`, each component `0.0–1.0`. |
+| `text_params` | [TextParams](#312-text) | for `text` | — | Text content / layout. |
+| `transform` | [Transform](#313-transform) | no | — | Position, scale, rotation, opacity. |
+| `effects` | [Effect](#38-effects)[] | no | `[]` | Ordered post-processing chain. |
+| `blend_mode` | enum | no | `"normal"` | Compositing mode (see §3.7). |
+| `shader` | string | no | — | Custom shader asset id overriding the default renderer. |
+| `preset` | string | no | — | Preset name (for `effect`-type adjustment clips). |
+| `params` | map | no | — | Parameters for the custom `shader` / `preset`. |
+
+### 3.7 Enumerations
+
+**`scale_mode`** (media scaling):
+
+| Value | Behaviour |
+| :--- | :--- |
+| `fit` | Uniform scale to fit inside the canvas (letterboxed). |
+| `fill` | Uniform scale to cover the canvas (cropped). |
+| `natural` | Source resolution, centered, no scaling. |
+| `stretch` | Non-uniform scale to exactly fill the canvas. |
+
+**`blend_mode`** (Photoshop-style): `normal`, `multiply`, `screen`, `overlay`,
+`darken`, `lighten`, `color_dodge`, `color_burn`, `hard_light`, `soft_light`,
+`difference`, `exclusion`.
+
+### 3.8 Effects
+
+Each entry in a clip's `effects` array applies a filter to the clip in order.
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `type` | string | yes | Effect id — a built-in (§5), a custom shader file stem, or `"preset"`. |
+| `shader` | string | no | Shader asset id, when overriding by asset rather than `type`. |
+| `preset` | string | no | Preset name, when `type` is `"preset"`. |
+| `params` | map<string, [Dynamic Value](#4-dynamic-values)> | no | Effect parameters. |
+
+There are two classes of effect:
+
+* **Registered effects** (§5) carry an `EFFECTS_METADATA` block in their WGSL
+  source. Their parameters are named, typed, and have documented defaults.
+* **Custom-shader effects** (any other `.wgsl` in `library/effects/` or an
+  `--include` path) receive their parameters through the
+  [custom-parameter packing contract](#7-custom-shader-parameter-contract).
+
+### 3.9 Transitions
+
+A transition cross-blends two adjacent clips on a track using a shader.
+
+| Field | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `id` | string | yes | — | Unique transition id. |
+| `type` | string | yes | — | Transition shader id (e.g. `"fade"`), or `"custom_shader"` paired with `shader`. |
+| `shader` | string | no | — | Explicit shader asset id. |
+| `from` | string | yes | — | Outgoing clip id. |
+| `to` | string | yes | — | Incoming clip id. |
+| `duration` | float | yes | — | Overlap length in seconds. |
+| `start` | float | no | midpoint¹ | Absolute timeline start. |
+| `params` | map<string, [Dynamic Value](#4-dynamic-values)> | no | — | Shader uniforms. |
+
+¹ Defaults to `to`'s start minus half the transition duration, so the transition
+straddles the cut. The built-in transition catalog is in §5.2.
+
+### 3.10 Presets
+
+A preset is a named, parameterised group of effects. Referencing a preset
+expands into its filters with the caller's arguments substituted.
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `name` | string | yes | Preset id, referenced by an effect's `preset` field. |
+| `inputs` | object[] | yes | Declared parameters: `{ "name", "type", "defaultValue" }`. `type` is `float`, `vec2`, or `string`. |
+| `filters` | [Effect](#38-effects)[] | yes | Effects to expand. Use `$name` in any string/param value to substitute an input. |
+
+Presets may reference other presets; expansion is bounded to a depth of 5.
+
+### 3.11 Audio Tracks
+
+| Field | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `id` | string | yes | — | Unique track id. |
+| `start` | float | no | `0.0` | Track start offset in seconds. |
+| `clips` | object[] | yes | — | Sequential audio clips. |
+
+Each audio clip:
+
+| Field | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `id` | string | yes | — | Unique clip id. |
+| `asset` | string | yes | — | Id of an `audio` or `video` asset. |
+| `duration` | float | yes | — | Playback length in seconds. |
+| `offset` | float | no | `0.0` | Gap before this clip, relative to the previous clip's end. |
+| `trim_start` | float | no | `0.0` | In-point within the source audio, in seconds. |
+
+Audio clips are mixed at unity gain (no automatic attenuation) and muxed with
+the video via FFmpeg.
+
+### 3.12 Text
+
+`text_params` supports two modes, selected by `kind`.
+
+**Simple mode** (default — `kind` omitted):
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `text` | string | The string to render. |
+| `font` | string | Font asset id. |
+| `font_size` | [Dynamic Value](#4-dynamic-values) | Type size in pixels. |
+| `color` | `[r,g,b,a]` | Text colour, `0.0–1.0`. |
+| `axes` | map<string, [Dynamic Value](#4-dynamic-values)> | OpenType variation axes (e.g. `"wght"`, `"wdth"`, `"slnt"`). |
+
+**Layout mode** (`kind: "layout"`): set `body` to a [LayoutNode](#312a-layout-nodes)
+tree.
+
+Both modes accept optional `entrance` and `exit`
+[text transitions](#312b-text-transitions).
+
+#### 3.12a Layout Nodes
+
+A layout node arranges text and nested nodes using stack semantics.
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `type` (alias `kind`) | string | `vstack`, `hstack`, `zstack`, `spacer`, or `text`. |
+| `children` | LayoutNode[] | Child nodes (for stacks). |
+| `spacing` | Dynamic | Gap between children. |
+| `alignment` | string | `left`, `center`, or `right`. |
+| `padding` | Dynamic | `[top,right,bottom,left]`, `[v,h]`, or a scalar. |
+| `size` | Dynamic | Fixed extent for a `spacer`. |
+| `text` | Dynamic (string) | Content for a `text` node. |
+| `font` | string | Font asset id. |
+| `font_size` | Dynamic | Type size. |
+| `color` | Dynamic | `[r,g,b,a]`. |
+| `axes` | map<string, Dynamic> | Variation axes. |
+
+#### 3.12b Text Transitions
+
+`entrance` and `exit` animate glyphs in/out, staggered per element.
+
+| Field | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `type` | string | yes | — | Transition label. |
+| `granularity` | string | no | `"letter"` | Stagger unit: `letter`/`character`, `word`, or `line`. |
+| `delay` | float | no | `0.0` | Per-element stagger in seconds (element index × delay). |
+| `duration` | float | yes | — | Per-element animation length. |
+| `easing` | string | no | `"linear"` | Easing curve (§4.2). |
+| `start_transform` | object | no | — | The offset state animated from (entrance) / to (exit). |
+
+`start_transform` fields: `position_offset` `[dx,dy]`, `scale` (scalar or
+`[sx,sy]`), `rotation` (degrees), `opacity` (`0.0–1.0`). At progress `0` a glyph
+sits fully at `start_transform`; at progress `1` it sits at its natural layout
+position with full opacity.
+
+### 3.13 Transform
+
+All transform fields are [Dynamic Values](#4-dynamic-values).
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `position` | vec2 | canvas center | `[x, y]` in pixels. |
+| `scale` | vec2 \| scalar | `1.0` | `[sx, sy]` or a uniform multiplier. |
+| `rotation` | float | `0.0` | Degrees. |
+| `opacity` | float | `1.0` | `0.0–1.0`. |
+
+---
+
+## 4. Dynamic Values
+
+Every scalar, vector, and colour property accepts three interchangeable forms.
+
+### 4.1 Forms
+
+**A — Constant**
+
+```json
+"scale": 1.2,
+"position": [400.0, 400.0],
+"color": [1.0, 1.0, 1.0, 1.0]
+```
+
+**B — Keyframe array** — interpolated by `clip_time`:
+
+```json
+"opacity": [
+  { "time": 0.0, "value": 0.0, "easing": "ease_out" },
+  { "time": 1.5, "value": 1.0 }
+]
+```
+
+* `time` — seconds relative to the clip start.
+* `value` — a scalar or a vector matching the property's arity.
+* `easing` — optional, on the **segment-start** keyframe (§4.2).
+
+Keyframes are sorted by `time` before evaluation. Before the first keyframe the
+first value holds; after the last, the last value holds.
+
+**C — Expression** — evaluated per frame:
+
+```json
+"position": { "expression": "[comp.width * 0.5 + 50.0 * sin(clip_time * 2.0), comp.height * 0.5]" }
+```
+
+For vector properties, the expression string is a bracketed, comma-separated
+list `"[exprX, exprY]"`; each component is evaluated independently (commas inside
+nested function calls are respected).
+
+### 4.2 Easing
+
+`easing` is either a named curve or a 4-element cubic-bézier control array
+`[x1, y1, x2, y2]` (CSS `cubic-bezier` semantics, fixed endpoints `(0,0)`/`(1,1)`).
+
+| Name | Curve |
+| :--- | :--- |
+| `linear` | identity (also the fallback for unknown names) |
+| `ease_in` | `t²` |
+| `ease_out` | `t·(2−t)` |
+| `ease_in_out` | `t²·(3−2t)` (smoothstep) |
+
+### 4.3 Expression DSL
+
+Expressions are evaluated with [`evalexpr`](https://crates.io/crates/evalexpr).
+
+**Operators:** `+`, `-`, `*`, `/`, `%`, plus the comparison/logical operators
+provided by `evalexpr`.
+
+**Constant:** `pi`.
+
+**Registered functions:** `sin(x)`, `cos(x)`, `tan(x)`, `abs(x)`, `sqrt(x)`,
+`pow(x, y)`, `min(x, y)`, `max(x, y)`, `clamp(x, lo, hi)`. Use `pow(x, y)` for
+exponentiation.
+
+**Context variables** (read-only):
+
+| Variable | Aliases | Description |
+| :--- | :--- | :--- |
+| `time` | — | Absolute timeline position (seconds). |
+| `clip_time` | `clip.time` | Position relative to the clip start (seconds). |
+| `clip_duration` | `clip.duration` | Duration of the enclosing clip (seconds). |
+| `comp_width` | `comp.width` | Canvas width (pixels). |
+| `comp_height` | `comp.height` | Canvas height (pixels). |
+
+Dotted aliases (`comp.width`, `clip.duration`, …) are accepted and normalised to
+their underscore forms. If an expression fails to compile or evaluate, the
+property falls back to its declared default.
+
+---
+
+## 5. Built-in Catalogs
+
+### 5.1 Registered Effects
+
+These ship with the engine and are referenced by `type` under a clip's
+`effects`. Defaults apply when a parameter is omitted.
+
+| `type` | Parameters (default) | Description |
+| :--- | :--- | :--- |
+| `grayscale` | `enabled` (1.0) | Luminance conversion; `>0.5` is on. |
+| `brightness` | `factor` (1.0) | Exposure multiplier. |
+| `contrast` | `factor` (1.0) | Contrast multiplier. |
+| `saturation` | `factor` (1.0) | Saturation multiplier. |
+| `hue_rotate` | `angle` (0.0) | Hue shift in degrees. |
+| `blur` | `radius` (0.0) | Gaussian blur radius. |
+| `glow` | `intensity` (0.0), `radius` (0.0), `threshold` (0.5) | Bloom from bright pixels above `threshold`. |
+| `film_grain` | `amount` (0.0), `speed` (1.0) | Animated noise. |
+| `film_flicker` | `amount` (0.0), `speed` (1.0) | Brightness flicker. |
+| `depth_blur` | `focus_x` (0.5), `focus_y` (0.5), `focus_radius` (0.2), `near_blur` (0.0), `far_blur` (0.0), `depth_map` | Depth-of-field; `depth_map` is an optional asset id. |
+| `flow` | `amount` (0.0), `speed` (1.0), `decay` (0.95) | Feedback-buffer flow displacement. |
+
+`grayscale` and `brightness` are also evaluated in the compositor pass; the
+remaining registered effects run as post-processing passes (and contribute
+debug spot-checks only for video output).
+
+### 5.2 Built-in Transitions
+
+Referenced from a track's `transitions` by `type` (or `type: "custom_shader"`
+with a matching `shader` id).
+
+| `type` | Parameters (default) | Description |
+| :--- | :--- | :--- |
+| `fade` | — | Linear opacity cross-fade. |
+| `wipe` | `direction` | Directional wipe. |
+| `flash_burn` | `flash_intensity` (0.8), `burn_intensity` (1.0) | Exposure flash plus an expanding film burn-in revealing the incoming clip. |
+| `focus_in` | `max_blur` (20.0) | Defocus-then-refocus with a breathing zoom. |
+| `slide_switch` | `direction` (0.0), `gap_size` (0.1), `flicker_intensity` (0.15), `z_padding` | 35 mm projector slide swap with motion blur, a black mount gap, a spring snap, and lamp flicker. `direction` `0.0` = horizontal, `1.0` = vertical. |
+
+### 5.3 Custom Shaders
+
+Additional WGSL effects ship in `library/effects/` without an `EFFECTS_METADATA`
+block (e.g. `bloom`, `chromatic_aberration`, `circuit_bent`, `crt`,
+`directional_blur`, `displacement_map`, `dithering`, `edge_detect`,
+`fluted_glass`, `halftone`, `ink`, `magnify_lens`, `pixelation`, `posterize`,
+`slice`, `smear`, `threshold`, `voxel`). Reference them by file stem as an
+effect `type` (or as a `shader` asset), and pass parameters per the contract in
+§7. You may add your own via `--include`.
+
+---
+
+## 6. Output & Verification
+
+### 6.1 Formats
+
+* **Still** (`.png`, `.jpg`, …) — the single frame at `t = 0`, written with
+  straight alpha.
+* **Video** (`.mp4`) — every frame piped to FFmpeg and encoded as H.264
+  (`yuv420p`) with AAC audio. Semi-transparent pixels are flattened onto black
+  before encoding.
+
+Remote destinations (§3.2) render to a temporary file first, then upload.
+
+### 6.2 Debug Run Layout
+
+With `--debug <dir>`, the engine creates a unique run folder
+`<specname>_render_NNNN/`:
+
+```
+<specname>_render_0001/
+├── logs.txt        # full execution trace (also echoed to stdout)
+├── review.json     # spot-check frame index → {timestamp, file, explanation}
+└── frames/
+    ├── frame_0000.png
+    ├── frame_0030.png
+    └── …            # frames at clip boundaries, transitions, and effect spot-checks
+```
+
+`review.json` is an array of `{ "frame", "timestamp", "file", "explanation" }`
+objects, one per spot-checked frame.
+
+---
+
+## 7. Custom-Shader Parameter Contract
+
+Custom shaders (and any effect without registered metadata) receive their
+`params` map packed into a single uniform buffer. The packing is **positional,
+not name-matched**, so authors **MUST** observe this contract:
+
+1. **Ordering.** Parameters are sorted **alphabetically by key**, then written
+   in that order. A shader's `CustomParams` struct fields **MUST** be declared
+   in the same alphabetical order.
+2. **Type inference** from the JSON value:
+   * number with a fractional part / expression / general number → `f32`;
+   * boolean → `u32` (`0` or `1`);
+   * integer → `i32`;
+   * 2-element numeric array or bracketed `"[…, …]"` expression → `vec2<f32>`
+     (8-byte aligned per std140).
+   * Other types (strings, longer arrays, objects) are skipped.
+3. **Alignment.** The buffer is zero-padded to a 16-byte multiple. An empty map
+   yields a 16-byte zero buffer so the binding is never zero-length.
+
+Every custom shader also receives a standard `EngineParams` uniform at
+`@binding(2)`: `{ time, clip_time, progress, width, height }` (transitions add a
+second input texture and use `TransitionEngineParams`). See `Agents.md` for the
+binding layouts and std140 alignment rules.
+
+---
+
+## 8. Reference Example
 
 ```json
 {
   "version": "1.0",
   "output": "outputs/voyage.mp4",
-  "composition": {
-    "width": 1920,
-    "height": 1080,
-    "fps": 30,
-    "duration": 15.0
-  },
+  "composition": { "width": 1920, "height": 1080, "fps": 30, "duration": 15.0 },
   "assets": {
-    "ocean_video": {
-      "type": "video",
-      "path": "assets/ocean.mp4"
-    },
-    "watermark_logo": {
-      "type": "image",
-      "path": "assets/logo.png"
-    },
-    "custom_font": {
-      "type": "font",
-      "provider": "file",
-      "path": "library/fonts/RobotoFlex.ttf"
-    },
-    "wave_shader": {
-      "type": "shader",
-      "path": "library/effects/wave.wgsl"
-    }
+    "ocean_video":    { "type": "video", "path": "assets/ocean.mp4" },
+    "watermark_logo": { "type": "image", "path": "assets/logo.png" },
+    "title_font":     { "type": "font", "provider": "file", "path": "library/fonts/Inter-VF.ttf" }
   },
   "presets": [
     {
       "name": "Dreamy Glow",
       "inputs": [
-        { "name": "blur_radius", "type": "float", "defaultValue": 5.0 },
         { "name": "glow_intensity", "type": "float", "defaultValue": 1.0 }
       ],
       "filters": [
-        {
-          "type": "blur",
-          "params": {
-            "radius": "$blur_radius"
-          }
-        },
-        {
-          "type": "glow",
-          "params": {
-            "intensity": "$glow_intensity",
-            "radius": 4.0,
-            "threshold": 0.4
-          }
-        }
+        { "type": "glow", "params": { "intensity": "$glow_intensity", "radius": 4.0, "threshold": 0.4 } }
       ]
     }
   ],
   "tracks": [
     {
-      "id": "background_track",
+      "id": "background",
       "clips": [
         {
-          "id": "bg_clip",
+          "id": "bg",
           "type": "media",
           "asset": "ocean_video",
           "duration": 15.0,
-          "scale_mode": "fill"
+          "scale_mode": "fill",
+          "effects": [ { "type": "Dreamy Glow", "preset": "Dreamy Glow" } ]
         }
       ]
     },
     {
-      "id": "overlay_track",
+      "id": "overlay",
       "start": 2.0,
       "clips": [
         {
-          "id": "watermark_clip",
+          "id": "watermark",
           "type": "media",
           "asset": "watermark_logo",
           "duration": 10.0,
-          "offset": 1.0,
           "scale_mode": "fit",
           "blend_mode": "screen",
           "transform": {
-            "position": {
-              "expression": "[comp.width * 0.85, comp.height * 0.15]"
-            },
+            "position": { "expression": "[comp.width * 0.85, comp.height * 0.15]" },
             "scale": 0.15,
             "opacity": [
               { "time": 0.0, "value": 0.0, "easing": "ease_out" },
@@ -165,7 +608,7 @@ The render specification is a declarative JSON structure representing a single t
       ]
     },
     {
-      "id": "text_track",
+      "id": "title",
       "start": 3.0,
       "clips": [
         {
@@ -181,16 +624,20 @@ The render specification is a declarative JSON structure representing a single t
                 {
                   "type": "text",
                   "text": "Ocean Voyage",
-                  "font": "custom_font",
+                  "font": "title_font",
                   "font_size": 48.0,
                   "color": [1.0, 1.0, 1.0, 1.0],
-                  "axes": {
-                    "wght": {
-                      "expression": "300.0 + 400.0 * (0.5 + 0.5 * sin(clip_time * 2.0))"
-                    }
-                  }
+                  "axes": { "wght": { "expression": "300.0 + 400.0 * (0.5 + 0.5 * sin(clip_time * 2.0))" } }
                 }
               ]
+            },
+            "entrance": {
+              "type": "rise",
+              "granularity": "letter",
+              "delay": 0.05,
+              "duration": 0.6,
+              "easing": "ease_out",
+              "start_transform": { "position_offset": [0.0, 40.0], "opacity": 0.0 }
             }
           }
         }
@@ -198,397 +645,4 @@ The render specification is a declarative JSON structure representing a single t
     }
   ]
 }
-```
-
----
-
-### 3.2. Root Spec Properties
-
-| Field | Type | Description |
-| :--- | :--- | :--- |
-| `version` | String | (Required) Schema format version. Must be `"1.0"`. |
-| `output` | String | (Required) Destination path for output. Extension determines format (`.mp4`, `.png`). |
-| `composition` | Object | (Required) Structural and runtime properties of the render timeline. |
-| `assets` | Map<String, Asset> | (Required) Registry of external files mapped by a unique identifier string. |
-| `presets` | Array<Preset> | (Optional) Definitions for custom, reusable compound filters. |
-| `tracks` | Array<Track> | (Required) Layered Z-indexed visual tracks. Index 0 is background. |
-| `audio_tracks` | Array<AudioTrack> | (Optional) Audio mix timelines. |
-
----
-
-### 3.3. Composition Settings
-
-Describes the project's physical dimensions and playback attributes.
-
-*   `width` (Integer, Required): Viewport width in pixels.
-*   `height` (Integer, Required): Viewport height in pixels.
-*   `fps` (Integer, Required): Frames per second.
-*   `duration` (Float, Required): Playback runtime in seconds.
-
----
-
-### 3.4. Assets Registry
-
-The asset definitions point to external dependency resources.
-
-```json
-"assets": {
-  "my_asset": {
-    "type": "image",
-    "path": "path/to/image.png"
-  }
-}
-```
-
-*   `type` (String, Required): One of `"video"`, `"image"`, `"audio"`, `"shader"`, or `"font"`.
-*   `path` (String, Required): File path, system identifier, or remote URL.
-*   `provider` (String, Optional): Source loader (required for `"font"`: `"file"`, `"system"`, or `"url"`).
-
----
-
-### 3.5. Tracks & Clip Arrangements
-
-Tracks represent Z-ordered layers composed onto the screen.
-
-```json
-"tracks": [
-  {
-    "id": "track_1",
-    "start": 1.0,
-    "clips": [ ... ]
-  }
-]
-```
-
-*   `id` (String, Required): Unique identifier for the track.
-*   `start` (Float, Optional, Default `0.0`): The start offset of the track in seconds. The first clip inside begins at this offset.
-*   `clips` (Array of Clips, Required): Sequential list of clips to play on this track.
-    > [!IMPORTANT]
-    > Clips inside a single track must be adjacent and sequential. They cannot overlap. To overlay clips, place them in separate Z-ordered tracks.
-
----
-
-### 3.6. Visual Clips (`clips`)
-
-Visual clips define content rendered onto a track at specific time windows.
-
-*   `id` (String, Required): Unique identifier for the clip.
-*   `type` (String, Required): Content model, must be one of:
-    *   `"media"`: Video or image assets.
-    *   `"solid"`: Solid background color.
-    *   `"text"`: Rendered text overlay.
-    *   `"effect"`: Adjustment layer applying filters to the layers below it.
-*   `duration` (Float, Required): active screen duration in seconds.
-*   `offset` (Float, Optional, Default `0.0`): A non-negative gap, in seconds, before this clip begins relative to the end of the previous clip on the track.
-*   `trim_start` (Float, Optional, Default `0.0`): The start time within the source media, in seconds, from which playback begins.
-*   `asset` (String, Optional): ID of the asset registry key (required for `"media"` type).
-*   `scale_mode` (String, Optional, Default `"fit"`): Scaling strategy for media:
-    *   `"fit"`: Uniform scale down to fit inside the composition bounds.
-    *   `"fill"`: Scale up to cover composition bounds, cropping excess.
-    *   `"natural"`: Retain source resolution without scaling (centered).
-    *   `"stretch"`: Non-uniform scale to match composition dimensions exactly.
-*   `solid_params` (Object, Optional): Defines solid color clip parameters.
-    *   `color` (Array of 4 floats, Required): RGBA values normalized to `[0.0, 1.0]`.
-*   `text_params` (Object, Optional): Configurations for text rendering.
-    *   `text` (String): Content string for traditional text.
-    *   `font` (String): Asset ID of the font.
-    *   `font_size` (Polymorphic Float): Base height of the typeface.
-    *   `color` (Array of 4 floats): RGBA text color.
-    *   `axes` (Map<String, Polymorphic Float>): OpenType font axis overrides (e.g. `"wght"`, `"wdth"`, `"slnt"`).
-    *   `kind` (String): If set to `"layout"`, activates the layout engine.
-    *   `body` (LayoutNode): Root layout node structure.
-*   `transform` (Object, Optional): Animatable spatial transforms:
-    *   `position`: Target layout coordinate `[x, y]`. Defaults to composition center.
-    *   `scale`: Scale factors `[sx, sy]` or a single uniform multiplier. Defaults to `1.0`.
-    *   `rotation`: Rotation in degrees. Defaults to `0.0`.
-    *   `opacity`: Opacity in `[0.0, 1.0]`. Defaults to `1.0`.
-*   `blend_mode` (String, Optional, Default `"normal"`): Photoshop-style blend mode. Standard values:
-    *   `"normal"`, `"multiply"`, `"screen"`, `"overlay"`, `"darken"`, `"lighten"`, `"color_dodge"`, `"color_burn"`, `"hard_light"`, `"soft_light"`, `"difference"`, `"exclusion"`.
-*   `effects` (Array of Effects, Optional): Ordered array of post-processing filters.
-*   `shader` (String, Optional): Shader asset ID to override default clip renderer.
-*   `preset` (String, Optional): Preset definition ID to use for `"effect"` clips.
-*   `params` (Map<String, Value>, Optional): Argument parameters passed to the custom shader or preset.
-
----
-
-### 3.7. Text Layout Nodes
-
-Used when `text_params.kind` is set to `"layout"` to construct complex structured typographic overlays.
-
-```json
-"body": {
-  "type": "vstack",
-  "spacing": 15.0,
-  "children": [
-    {
-      "type": "text",
-      "text": "Heading Line",
-      "font": "header_font",
-      "font_size": 32.0
-    }
-  ]
-}
-```
-
-*   `type` (String, Required): Structural tag: `"vstack"`, `"hstack"`, `"zstack"`, `"spacer"`, or `"text"`.
-*   `spacing` (Float, Optional): Gap between children in stacks.
-*   `alignment` (String, Optional): Horizontal alignment (`"left"`, `"center"`, `"right"`).
-*   `padding` (Array of 4 floats, Optional): Inner spacing `[top, right, bottom, left]`.
-*   `size` (Float, Optional): Size of spacers.
-*   `text` (String, Optional): Rendered content (for `"text"` nodes).
-*   `font` (String, Optional): Font asset reference.
-*   `font_size` (Polymorphic Float, Optional): Typographic scale height.
-*   `color` (Array of 4 floats, Optional): Typographic RGBA color.
-*   `axes` (Map<String, Polymorphic Float>, Optional): Variation axis mappings.
-
----
-
-### 3.8. Transitions
-
-Transitions cross-fade or wipe adjacent clips in a track over a specified overlay window.
-
-```json
-"transitions": [
-  {
-    "id": "cross_wipe",
-    "type": "custom_shader",
-    "shader": "wipe_shader",
-    "start": 4.5,
-    "duration": 1.0,
-    "from": "clip_a",
-    "to": "clip_b",
-    "params": {
-      "direction": 1.0
-    }
-  }
-]
-```
-
-*   `id` (String, Required): Unique transition identifier.
-*   `type` (String, Required): Transition pipeline type (e.g. `"custom_shader"`).
-*   `shader` (String, Required): Custom shader asset ID.
-*   `start` (Float, Optional): Absolute composition timeline start. Defaults to the midpoint between the outgoing and incoming clip boundaries.
-*   `duration` (Float, Required): Runtime overlap duration in seconds.
-*   `from` (String, Required): Outgoing clip ID.
-*   `to` (String, Required): Incoming clip ID.
-*   `params` (Map<String, Value>, Optional): Uniform parameters passed to transition shader.
-
-### 3.8.1. Built-in Transition Shaders Library
-
-The engine provides a collection of built-in transitions in the `library/transitions/` directory. These can be referenced in the transition spec using `type: "custom_shader"` and their corresponding shader asset ID pointing to the built-in WGSL file:
-
-#### A. Flash / Burn In (`"shader": "flash_burn_shader"`)
-Simulates a bright camera exposure flash peaking at the midpoint of the transition, combined with an organic film burn-in hot-spot that expands from the center to reveal the incoming clip.
-*   `flash_intensity` (Float, Default `0.8`): Peak brightness offset of the camera exposure spike.
-*   `burn_intensity` (Float, Default `1.0`): Noise-based boundary perturbation intensity of the expanding burn hotspot.
-
-#### B. Focus Blur / Focus In (`"shader": "focus_in_shader"`)
-Defocuses the outgoing clip and brings the incoming clip into focus, accompanied by a subtle focus breathing zoom effect that mimics real camera optics.
-*   `max_blur` (Float, Default `20.0`): Maximum blur radius in pixels at the peak of defocus.
-
-#### C. 35mm Slide Projector Switching (`"shader": "slide_switch_shader"`)
-Emulates the mechanical slide swap in a physical 35mm projector. Features motion blur along the axis of movement, a black separation frame/gap, a damped spring-like snap landing bounce, random lamp flicker, and warm orange light leaks near the gap.
-*   `direction` (Float, Default `0.0`): Movement direction (`0.0` for horizontal slide switch, `1.0` for vertical).
-*   `gap_size` (Float, Default `0.1`): Thickness of the black slide mount frame border relative to screen height/width.
-*   `flicker_intensity` (Float, Default `0.15`): Projector lamp brightness vibration intensity.
-
----
-
-### 3.9. Presets
-
-Presets define reusable compound visual filters that map custom arguments to child filters.
-
-```json
-"presets": [
-  {
-    "name": "Vaporwave",
-    "inputs": [
-      { "name": "intensity", "type": "float", "defaultValue": 0.5 }
-    ],
-    "filters": [
-      {
-        "type": "saturation",
-        "params": { "factor": "1.0 + $intensity" }
-      }
-    ]
-  }
-]
-```
-
-*   `name` (String, Required): Global identifier for the preset.
-*   `inputs` (Array of Objects, Required): Parameters declared by the preset.
-    *   `name` (String, Required): Parameter key.
-    *   `type` (String, Required): Data format (`"float"`, `"vec2"`, or `"string"`).
-    *   `defaultValue` (Value, Required): Fallback parameter value.
-*   `filters` (Array of Effects, Required): Array of filters evaluated when the preset is called. Variables are substituted using the `$<name>` syntax.
-
----
-
-### 3.10. Audio Specs (`audio_tracks`)
-
-Exposes audio mixing lanes processed in parallel with video layers.
-
-*   `id` (String, Required): Unique track key.
-*   `start` (Float, Optional, Default `0.0`): Track start offset in seconds.
-*   `clips` (Array, Required): Audio clips on the track.
-    *   `id` (String, Required): Unique clip key.
-    *   `asset` (String, Required): Asset ID pointing to an audio file or a video containing audio.
-    *   `duration` (Float, Required): Playback runtime in seconds.
-    *   `offset` (Float, Optional, Default `0.0`): A non-negative gap, in seconds, before this audio clip begins relative to the end of the previous audio clip on this track.
-
----
-
-## 4. Dynamic Values and Expression DSL
-
-Every float or vector value (scale, position, shader parameters, opacities, font variation axes) supports dynamic resolution.
-
-### 4.1. Supported Value Formats
-
-#### Format A: Static Constant (Shorthand)
-Specifies a constant value.
-```json
-"scale": 1.2,
-"position": [400.0, 400.0]
-```
-
-#### Format B: Keyframe Array (Animated)
-Allows keyframed interpolation.
-```json
-"opacity": [
-  { "time": 0.0, "value": 0.0, "easing": "ease_out" },
-  { "time": 2.0, "value": 1.0 }
-]
-```
-*   `time` (Float, Required): Offset relative to the parent clip start (in seconds).
-*   `value` (Float or Array, Required): Frame target value.
-*   `easing` (String or Array, Optional, Default `"linear"`): Easing transition. Supported strings: `"linear"`, `"ease_in"`, `"ease_out"`, `"ease_in_out"`. Custom Bezier curves are supported as a 4-float coordinate array `[x1, y1, x2, y2]`.
-
-#### Format C: Mathematical Expression (Expression DSL)
-Evaluates dynamic math formulas per frame.
-```json
-"position": {
-  "expression": "[comp.width * 0.5 + 50.0 * sin(clip_time * 2.0), comp.height * 0.5]"
-}
-```
-
----
-
-### 4.2. Expression Syntax
-
-The mathematical engine parses statements using a standard mathematical syntax:
-
-*   **Operators**: `+`, `-`, `*`, `/`, `%`, `^` (exponentiation).
-*   **Constants**: `pi`, `e`.
-*   **Functions**: `sin(x)`, `cos(x)`, `tan(x)`, `abs(x)`, `sqrt(x)`, `min(x, y)`, `max(x, y)`, `clamp(x, min, max)`, `pow(x, y)`.
-*   **Array Literals**: `[x, y]` or `[r, g, b, a]` for multi-dimensional vector properties.
-
-### 4.3. Runtime Context Variables
-
-Expressions have read-only access to the following environment scope:
-
-| Variable | Type | Description |
-| :--- | :--- | :--- |
-| `comp.width` | Float | Canvas width in pixels. |
-| `comp.height` | Float | Canvas height in pixels. |
-| `time` | Float | Absolute timeline position in seconds. |
-| `clip_time` | Float | Relative play position from the clip's start in seconds. |
-| `clip.duration` | Float | Duration of the enclosing clip in seconds. |
-
----
-
-## 5. Built-in Effects Catalog
-
-These standard visual filters are packaged directly inside the engine and can be called under the `effects` block of any visual clip.
-
-### 5.1. Grayscale (`"type": "grayscale"`)
-Converts the RGB color channels to monochrome luminance.
-*   `enabled` (Float, Default `1.0`): Active intensity (`0.0` is off, `1.0` is fully grayscale).
-
-### 5.2. Brightness (`"type": "brightness"`)
-Adjusts the exposure of the source image.
-*   `factor` (Float, Default `1.0`): Luminance scale multiplier.
-
-### 5.3. Contrast (`"type": "contrast"`)
-Adjusts color contrast.
-*   `factor` (Float, Default `1.0`): Contrast scale multiplier.
-
-### 5.4. Saturation (`"type": "saturation"`)
-Adjusts color saturation.
-*   `factor` (Float, Default `1.0`): Color saturation multiplier.
-
-### 5.5. Hue Rotate (`"type": "hue_rotate"`)
-Shifts color hues.
-*   `angle` (Float, Default `0.0`): Hue rotation angle in degrees `[0.0, 360.0]`.
-
-### 5.6. Blur (`"type": "blur"`)
-Applies a blur pass.
-*   `radius` (Float, Default `0.0`): Filter sample radius size.
-
-### 5.7. Glow (`"type": "glow"`)
-Isolates bright pixels and smears them back over the source.
-*   `intensity` (Float, Default `1.0`): Glow addition multiplier.
-*   `radius` (Float, Default `4.0`): Smear blur radius.
-*   `threshold` (Float, Default `0.4`): Lower luminance gate. Pixels darker than this are excluded from glow.
-
-### 5.8. Film Grain (`"type": "film_grain"`)
-Applies dynamic noise to the image.
-*   `amount` (Float, Default `0.0`): Grain noise opacity.
-*   `speed` (Float, Default `1.0`): Noise oscillation frame frequency.
-
-### 5.9. Film Flicker (`"type": "film_flicker"`)
-Applies brightness flicker.
-*   `amount` (Float, Default `0.0`): Maximum brightness deviation scale.
-*   `speed` (Float, Default `1.0`): Flicker frequency.
-
-### 5.10. Depth Blur (`"type": "depth_blur"`)
-Simulates shallow depth-of-field.
-*   `focus_x` (Float, Default `0.5`): Focus center coordinate horizontal axis `[0.0, 1.0]`.
-*   `focus_y` (Float, Default `0.5`): Focus center coordinate vertical axis `[0.0, 1.0]`.
-*   `focus_radius` (Float, Default `0.25`): Bounds of unblurred region.
-*   `near_blur` (Float, Default `0.0`): Blur radius inside focus area.
-*   `far_blur` (Float, Default `10.0`): Blur radius outside focus area.
-*   `use_map` (Float/String, Optional): Enables depth map asset file sampling if set.
-
-### 5.11. Flow (`"type": "flow"`)
-Applies feedback flow displacement.
-*   `amount` (Float, Default `0.0`): Displacement strength.
-*   `speed` (Float, Default `1.0`): Displacement wave speed.
-*   `decay` (Float, Default `0.96`): Feedback buffer persistent decay.
-
----
-
-## 6. Execution Output & Verification
-
-The engine generates outputs based on the destination file extension specified in the `output` field:
-
-### 6.1. Media Output Formats
-*   **Static Image (`.png` / `.jpg`)**: Renders the composition frame at timeline point `0.0` and exports a lossless image file.
-*   **Video / Audio (`.mp4`)**: Mixes all audio and visual tracks, pipes frame-by-frame raw video frames into an internal FFmpeg subprocess, and exports a H.264/AAC-compressed video stream.
-
-### 6.2. Debug Run Directory Structure
-When run with the `--debug <debug_dir>` flag, the engine creates a unique timestamped subfolder representing the run.
-
-```
-<debug_dir>/
-├── logs.txt
-├── review.json
-└── frames/
-    ├── frame_0000.png
-    ├── frame_0030.png
-    └── frame_0060.png
-```
-
-*   `logs.txt`: Execution trace tracking thread speeds, shader compiles, and pipe writes.
-*   `frames/`: Diagnostic spot-checks containing keyframe outputs and track transition moments.
-*   `review.json`: A machine-readable list mapping spotcheck frames to timestamps and event explanations.
-
-```json
-[
-  {
-    "frame": 30,
-    "timestamp": 1.0,
-    "file": "frames/frame_0030.png",
-    "explanation": "Track 'overlay_track' - Clip 'watermark_clip' starts"
-  }
-]
 ```
