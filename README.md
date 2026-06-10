@@ -90,6 +90,12 @@ extension.
 expression grammar — lives in [SPEC.md](./SPEC.md).** Each feature below links
 to its section there.
 
+✍️ **Prefer something more readable to hand-write?** Render also accepts a
+[KDL](https://kdl.dev) front-end — `render-poc timeline.kdl` transpiles to the
+same spec. The same eight-line timeline drops from ~80 lines of JSON to ~15,
+with comments, hex colors, and `def`/`use` reuse. See [KDL.md](./KDL.md)
+(`--emit-json` shows what any `.kdl` compiles to).
+
 ---
 
 ## Features

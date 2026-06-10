@@ -1,0 +1,14 @@
+// Dynamic transitions — KDL port of tests/fixtures/10_dynamic_transitions.json
+composition width=800 height=800 fps=30 duration=8.0
+output "tests/fixtures/outputs/10_dynamic_transitions.mp4"
+
+track "main_track" {
+    solid "red_clip"   2.0 color="#CC3333"
+    solid "green_clip" 2.0 color="#33CC33"
+    solid "blue_clip"  2.0 color="#3333CC"
+    solid "white_clip" 2.0 color="#B3B3B3"
+
+    fade         "fade_trans"  from="red_clip"   to="green_clip" at=1.5 dur=1.0
+    focus_in     "focus_trans" from="green_clip" to="blue_clip"  at=3.5 dur=1.0 max_blur=15.0
+    slide_switch "slide_trans" from="blue_clip"  to="white_clip" at=5.5 dur=1.0 direction=1.0 flicker_intensity=0.2 gap_size=0.12
+}

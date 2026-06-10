@@ -1,0 +1,38 @@
+// Layout + reusable entrance — demonstrates the KDL front-end.
+// Renders identically through `render-poc tests/fixtures/16_layout_kdl.kdl`.
+composition width=1080 height=1920 fps=30 duration=4.0
+output "tests/fixtures/outputs/16_layout_kdl.mp4"
+
+font "inter"        path="library/fonts/Inter-VF.ttf" provider="local"
+font "inter_italic" path="library/fonts/Inter-VF.ttf" provider="local"
+
+// Define the entrance once, reuse it on every clip.
+def "reveal_in" {
+    enter "reveal" granularity="letter" delay=0.0 dur=0.2 easing="linear" {
+        from opacity=0.0
+    }
+}
+
+track "layout_track" {
+    text "clip_1" 2.0 {
+        enter use="reveal_in"
+        vstack spacing=50.0 align="center" {
+            padding 100.0 60.0 100.0 60.0
+            text "VStack Alignment Focus" font="inter" size=72.0 color="#F2E633"
+            spacer 60.0
+            text "Center-aligned body copy that wraps inside the container." font="inter_italic" size=44.0 color="#FFFFFFE6"
+            spacer
+            text "Footer Text" font="inter" size=36.0 color="#999999"
+        }
+    }
+    text "clip_2" 2.0 {
+        enter use="reveal_in" delay=0.05
+        vstack spacing=40.0 align="center" {
+            text "Variable Weight" font="inter" size=64.0 color="#FFFFFF" {
+                axes {
+                    wght (expr)"300.0 + 400.0 * (0.5 + 0.5 * sin(clip_time * 3.14159))"
+                }
+            }
+        }
+    }
+}

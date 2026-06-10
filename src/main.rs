@@ -60,6 +60,7 @@ struct CliArgs {
     gcs_secret: Option<String>,
     mux_token_id: Option<String>,
     mux_token_secret: Option<String>,
+    emit_json: bool,
 }
 
 #[derive(clap::Parser, Debug)]
@@ -127,6 +128,11 @@ struct Opts {
     /// Set an arbitrary override in key=value format
     #[arg(long = "set")]
     set: Vec<String>,
+
+    /// Print the resolved spec as JSON (after KDL transpilation and overrides)
+    /// and exit without rendering. Useful for inspecting what a `.kdl` compiles to.
+    #[arg(long = "emit-json")]
+    emit_json: bool,
 }
 
 fn parse_args() -> CliArgs {
@@ -178,6 +184,7 @@ fn parse_args() -> CliArgs {
         gcs_secret: opts.gcs_secret,
         mux_token_id: opts.mux_token_id,
         mux_token_secret: opts.mux_token_secret,
+        emit_json: opts.emit_json,
     }
 }
 
@@ -1418,10 +1425,25 @@ fn main() {
     let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
 
     // ── Spec loading ─────────────────────────────────────────────────────
+    // Accepts both `.json` specs and the readable `.kdl` front-end; a `.kdl`
+    // file is transpiled to the same spec JSON before anything downstream runs.
     let spec_start = Instant::now();
-    let spec_file = File::open(&args.spec_path).expect("Failed to open spec file");
-    let reader = BufReader::new(spec_file);
-    let mut spec_value: serde_json::Value = serde_json::from_reader(reader).expect("Failed to parse JSON");
+    let is_kdl = args
+        .spec_path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("kdl"))
+        .unwrap_or(false);
+    let mut spec_value: serde_json::Value = if is_kdl {
+        let src = std::fs::read_to_string(&args.spec_path).expect("Failed to read spec file");
+        render_poc::kdl_spec::kdl_to_spec_json(&src).unwrap_or_else(|e| {
+            eprintln!("Error in KDL spec {:?}:\n{}", args.spec_path, e);
+            std::process::exit(1);
+        })
+    } else {
+        let spec_file = File::open(&args.spec_path).expect("Failed to open spec file");
+        let reader = BufReader::new(spec_file);
+        serde_json::from_reader(reader).expect("Failed to parse JSON")
+    };
     
     for (path, val) in &args.overrides {
         if let Err(e) = apply_override(&mut spec_value, path, val) {
@@ -1432,7 +1454,11 @@ fn main() {
 
     sort_value_keyframes(&mut spec_value);
 
-    
+    if args.emit_json {
+        println!("{}", serde_json::to_string_pretty(&spec_value).expect("Failed to serialize spec"));
+        return;
+    }
+
     let mut spec: RenderSpec = serde_json::from_value(spec_value).expect("Failed to deserialize final spec with overrides");
     let spec_load_dur = spec_start.elapsed();
 

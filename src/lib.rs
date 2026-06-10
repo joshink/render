@@ -13,6 +13,7 @@
 pub mod config;
 pub mod download;
 pub mod engine;
+pub mod kdl_spec;
 pub mod layout;
 pub mod lut;
 pub mod upload;
