@@ -1072,6 +1072,64 @@ pub fn sort_value_keyframes(val: &mut serde_json::Value) {
 // ---------------------------------------------------------------------------
 
 
+/// Maps a normalised progress `t` ∈ [0,1] through a named easing curve.
+/// Recognises the documented set (`linear`, `ease_in`, `ease_out`,
+/// `ease_in_out`); unknown names fall back to linear.
+fn apply_named_easing(t: f32, easing: &str) -> f32 {
+    match easing.to_ascii_lowercase().as_str() {
+        "ease_in" | "ease-in" => t * t,
+        "ease_out" | "ease-out" => t * (2.0 - t),
+        "ease_in_out" | "ease-in-out" => t * t * (3.0 - 2.0 * t),
+        _ => t, // "linear" or unknown
+    }
+}
+
+/// Evaluates a CSS-style `cubic-bezier(x1, y1, x2, y2)` easing curve with fixed
+/// endpoints P0=(0,0) and P3=(1,1). Given an input progress `t` (the x value),
+/// solves for the curve parameter `s` such that x(s)=t via Newton–Raphson, then
+/// returns the corresponding y(s).
+fn cubic_bezier_ease(t: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    // Cubic Bézier component with p0=0, p3=1 and the two given control points.
+    let bezier = |s: f32, c1: f32, c2: f32| {
+        let u = 1.0 - s;
+        3.0 * u * u * s * c1 + 3.0 * u * s * s * c2 + s * s * s
+    };
+    let bezier_dx = |s: f32, c1: f32, c2: f32| {
+        let u = 1.0 - s;
+        3.0 * u * u * c1 + 6.0 * u * s * (c2 - c1) + 3.0 * s * s * (1.0 - c2)
+    };
+    // Newton–Raphson, seeded at s=t; the x-curve is monotonic for valid control
+    // points so a handful of iterations converges tightly.
+    let mut s = t;
+    for _ in 0..8 {
+        let x = bezier(s, x1, x2) - t;
+        if x.abs() < 1e-5 {
+            break;
+        }
+        let dx = bezier_dx(s, x1, x2);
+        if dx.abs() < 1e-6 {
+            break;
+        }
+        s = (s - x / dx).clamp(0.0, 1.0);
+    }
+    bezier(s, y1, y2)
+}
+
+/// Resolves the eased progress for a keyframe segment. `easing` is the optional
+/// `"easing"` field on the *segment-start* keyframe and may be a string
+/// (`"ease_out"`) or a 4-element cubic-bezier array `[x1, y1, x2, y2]`.
+fn apply_keyframe_easing(progress: f32, easing: Option<&serde_json::Value>) -> f32 {
+    match easing {
+        Some(serde_json::Value::String(s)) => apply_named_easing(progress, s),
+        Some(serde_json::Value::Array(arr)) if arr.len() == 4 => {
+            let c: Vec<f32> = arr.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect();
+            cubic_bezier_ease(progress, c[0], c[1], c[2], c[3])
+        }
+        _ => progress,
+    }
+}
+
 /// Evaluates a JSON value as a single `f32`. The value may be:
 /// - A **literal number** — returned directly.
 /// - An **expression object** `{ "expression": "..." }` — evaluated via `evalexpr`.
@@ -1128,7 +1186,8 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, duration: f32, 
             for i in 0..arr.len() - 1 {
                 if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
                     if clip_time >= t1 && clip_time <= t2 {
-                        let progress = (clip_time - t1) / (t2 - t1).max(0.0001);
+                        let raw = (clip_time - t1) / (t2 - t1).max(0.0001);
+                        let progress = apply_keyframe_easing(raw, arr[i].get("easing"));
                         return v1 + progress * (v2 - v1);
                     }
                 }
@@ -1144,6 +1203,28 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, duration: f32, 
 /// - A **keyframe array** `[{ "time": t, "value": [x, y] }, ...]` — linearly interpolated.
 /// - An **expression object** with a bracketed pair `"[exprX, exprY]"` — each component evaluated.
 /// - `null` or unrecognised — returns `default`.
+/// Splits a string on commas that are not nested inside parentheses or
+/// brackets, so a vec2 expression like `clamp(x, 0, 1), y` separates into its
+/// two components rather than fragmenting the inner function arguments.
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
 pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, duration: f32, width: u32, height: u32, default: [f32; 2]) -> [f32; 2] {
     // Null → default
     if value.is_null() {
@@ -1199,7 +1280,8 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, duration: f32, w
             for i in 0..arr.len() - 1 {
                 if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
                     if clip_time >= t1 && clip_time <= t2 {
-                        let progress = (clip_time - t1) / (t2 - t1).max(0.0001);
+                        let raw = (clip_time - t1) / (t2 - t1).max(0.0001);
+                        let progress = apply_keyframe_easing(raw, arr[i].get("easing"));
                         let rx = v1[0] + progress * (v2[0] - v1[0]);
                         let ry = v1[1] + progress * (v2[1] - v1[1]);
                         return [rx, ry];
@@ -1218,7 +1300,7 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, duration: f32, w
             if let Some(expr_str) = expr_val.as_str() {
                 if expr_str.starts_with('[') && expr_str.ends_with(']') {
                     let inner = &expr_str[1..expr_str.len() - 1];
-                    let parts: Vec<&str> = inner.split(',').collect();
+                    let parts = split_top_level_commas(inner);
                     if parts.len() == 2 {
                         let x = evaluate_simple_expression(parts[0].trim(), clip_time, duration, width, height, default[0]);
                         let y = evaluate_simple_expression(parts[1].trim(), clip_time, duration, width, height, default[1]);
@@ -1306,7 +1388,8 @@ pub fn evaluate_vec4(value: &serde_json::Value, clip_time: f32, duration: f32, w
             for i in 0..arr.len() - 1 {
                 if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
                     if clip_time >= t1 && clip_time <= t2 {
-                        let progress = (clip_time - t1) / (t2 - t1).max(0.0001);
+                        let raw = (clip_time - t1) / (t2 - t1).max(0.0001);
+                        let progress = apply_keyframe_easing(raw, arr[i].get("easing"));
                         return [
                             v1[0] + progress * (v2[0] - v1[0]),
                             v1[1] + progress * (v2[1] - v1[1]),
@@ -1348,9 +1431,27 @@ pub fn evaluate_padding(value: &serde_json::Value, clip_time: f32, duration: f32
 }
 
 use std::sync::{OnceLock, Mutex};
+use std::cell::Cell;
 
 static BASE_CONTEXT: OnceLock<HashMapContext> = OnceLock::new();
 static EXPR_CACHE: OnceLock<Mutex<HashMap<String, evalexpr::Node>>> = OnceLock::new();
+
+thread_local! {
+    /// The absolute timeline position (seconds) of the frame currently being
+    /// rendered. SPEC §4.3 distinguishes `time` (absolute) from `clip_time`
+    /// (relative to the clip start). Absolute time is constant across every
+    /// expression evaluated within a single frame, so rather than threading it
+    /// through every `evaluate_*` signature we publish it once per frame here
+    /// and `build_eval_context` reads it for the `time` variable.
+    static CURRENT_ABSOLUTE_TIME: Cell<Option<f32>> = const { Cell::new(None) };
+}
+
+/// Publishes the absolute timeline time for the frame about to be rendered.
+/// Must be called once at the start of each frame (before any expression is
+/// evaluated) so the `time` variable resolves to the global timeline position.
+pub fn set_current_absolute_time(time: f32) {
+    CURRENT_ABSOLUTE_TIME.with(|c| c.set(Some(time)));
+}
 
 fn get_float_helper(val: &evalexpr::Value) -> Result<f64, evalexpr::EvalexprError> {
     if let Ok(f) = val.as_float() {
@@ -1407,13 +1508,62 @@ fn get_base_context() -> &'static HashMapContext {
             let exponent = get_float_helper(&tuple[1])?;
             Ok(evalexpr::Value::Float(base.powf(exponent)))
         }));
+
+        // `min`/`max`/`clamp` are documented in SPEC §4.2. evalexpr ships
+        // built-in min/max, but we register float-coercing versions here so
+        // mixed int/float arguments behave consistently, and `clamp` (which
+        // has no built-in) is available at all.
+        let _ = context.set_function("min".into(), evalexpr::Function::new(|argument| {
+            let tuple = argument.as_tuple()?;
+            if tuple.len() != 2 {
+                return Err(evalexpr::EvalexprError::CustomMessage(format!(
+                    "min expects exactly 2 arguments, got {}",
+                    tuple.len()
+                )));
+            }
+            let a = get_float_helper(&tuple[0])?;
+            let b = get_float_helper(&tuple[1])?;
+            Ok(evalexpr::Value::Float(a.min(b)))
+        }));
+
+        let _ = context.set_function("max".into(), evalexpr::Function::new(|argument| {
+            let tuple = argument.as_tuple()?;
+            if tuple.len() != 2 {
+                return Err(evalexpr::EvalexprError::CustomMessage(format!(
+                    "max expects exactly 2 arguments, got {}",
+                    tuple.len()
+                )));
+            }
+            let a = get_float_helper(&tuple[0])?;
+            let b = get_float_helper(&tuple[1])?;
+            Ok(evalexpr::Value::Float(a.max(b)))
+        }));
+
+        let _ = context.set_function("clamp".into(), evalexpr::Function::new(|argument| {
+            let tuple = argument.as_tuple()?;
+            if tuple.len() != 3 {
+                return Err(evalexpr::EvalexprError::CustomMessage(format!(
+                    "clamp expects exactly 3 arguments (x, min, max), got {}",
+                    tuple.len()
+                )));
+            }
+            let x = get_float_helper(&tuple[0])?;
+            let lo = get_float_helper(&tuple[1])?;
+            let hi = get_float_helper(&tuple[2])?;
+            // Guard against inverted bounds so the result stays within [lo, hi].
+            Ok(evalexpr::Value::Float(x.max(lo).min(hi)))
+        }));
+
         context
     })
 }
 
 fn build_eval_context(clip_time: f32, duration: f32, width: u32, height: u32) -> HashMapContext {
     let mut context = get_base_context().clone();
-    let _ = context.set_value("time".into(), (clip_time as f64).into());
+    // `time` is the absolute timeline position; fall back to clip_time when no
+    // frame is in progress (e.g. CPU-only spot-check label evaluation).
+    let abs_time = CURRENT_ABSOLUTE_TIME.with(|c| c.get()).unwrap_or(clip_time);
+    let _ = context.set_value("time".into(), (abs_time as f64).into());
     let _ = context.set_value("clip_time".into(), (clip_time as f64).into());
     let _ = context.set_value("clip_duration".into(), (duration as f64).into());
     let _ = context.set_value("comp_width".into(), (width as i64).into());
@@ -1463,4 +1613,77 @@ pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, wid
 
     // Fallback: try parsing the raw string as a number
     expr.parse::<f32>().unwrap_or(default)
+}
+
+#[cfg(test)]
+mod expr_keyframe_tests {
+    use super::*;
+
+    fn approx(a: f32, b: f32) -> bool { (a - b).abs() < 1e-3 }
+
+    #[test]
+    fn clamp_min_max_are_available() {
+        // clamp(x, lo, hi)
+        assert!(approx(evaluate_simple_expression("clamp(5.0, 0.0, 1.0)", 0.0, 1.0, 100, 100, -999.0), 1.0));
+        assert!(approx(evaluate_simple_expression("clamp(-5.0, 0.0, 1.0)", 0.0, 1.0, 100, 100, -999.0), 0.0));
+        assert!(approx(evaluate_simple_expression("clamp(0.3, 0.0, 1.0)", 0.0, 1.0, 100, 100, -999.0), 0.3));
+        // min / max with mixed int/float
+        assert!(approx(evaluate_simple_expression("min(3, 2.0)", 0.0, 1.0, 100, 100, -999.0), 2.0));
+        assert!(approx(evaluate_simple_expression("max(3, 2.0)", 0.0, 1.0, 100, 100, -999.0), 3.0));
+    }
+
+    #[test]
+    fn time_variable_uses_absolute_timeline() {
+        // Absolute time = 4.0, clip-relative time passed in = 1.0
+        set_current_absolute_time(4.0);
+        let v = serde_json::json!({ "expression": "time" });
+        assert!(approx(evaluate_float(&v, 1.0, 5.0, 100, 100, 0.0), 4.0), "time should be absolute");
+        let v2 = serde_json::json!({ "expression": "clip_time" });
+        assert!(approx(evaluate_float(&v2, 1.0, 5.0, 100, 100, 0.0), 1.0), "clip_time should be relative");
+    }
+
+    #[test]
+    fn keyframe_easing_is_applied() {
+        // Two keyframes 0->1 over [0,1] with ease_in (t*t). At t=0.5 -> 0.25, not 0.5.
+        let kf = serde_json::json!([
+            { "time": 0.0, "value": 0.0, "easing": "ease_in" },
+            { "time": 1.0, "value": 1.0 }
+        ]);
+        let v = evaluate_float(&kf, 0.5, 1.0, 100, 100, 0.0);
+        assert!(approx(v, 0.25), "ease_in at midpoint should be 0.25, got {}", v);
+
+        // Linear (no easing) -> 0.5
+        let kf_lin = serde_json::json!([
+            { "time": 0.0, "value": 0.0 },
+            { "time": 1.0, "value": 1.0 }
+        ]);
+        assert!(approx(evaluate_float(&kf_lin, 0.5, 1.0, 100, 100, 0.0), 0.5));
+    }
+
+    #[test]
+    fn keyframe_cubic_bezier_easing() {
+        // Linear bezier control points reproduce the identity curve.
+        let kf = serde_json::json!([
+            { "time": 0.0, "value": 0.0, "easing": [0.0, 0.0, 1.0, 1.0] },
+            { "time": 1.0, "value": 10.0 }
+        ]);
+        let v = evaluate_float(&kf, 0.5, 1.0, 100, 100, 0.0);
+        assert!(approx(v, 5.0), "linear bezier at midpoint should be 5.0, got {}", v);
+    }
+
+    #[test]
+    fn vec2_expression_handles_inner_commas() {
+        // Each component is a function call whose own arguments contain commas;
+        // the top-level split must only break between the two components.
+        let v = serde_json::json!({ "expression": "[min(2, 3), max(1, 4)]" });
+        let out = evaluate_vec2(&v, 0.0, 1.0, 100, 100, [-1.0, -1.0]);
+        assert!(approx(out[0], 2.0) && approx(out[1], 4.0), "got {:?}", out);
+    }
+
+    #[test]
+    fn split_top_level_commas_ignores_nested() {
+        assert_eq!(split_top_level_commas("a, b"), vec!["a", " b"]);
+        assert_eq!(split_top_level_commas("clamp(x, 0, 1), y"), vec!["clamp(x, 0, 1)", " y"]);
+        assert_eq!(split_top_level_commas("f(g(1,2), 3), h"), vec!["f(g(1,2), 3)", " h"]);
+    }
 }

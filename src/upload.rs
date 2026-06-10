@@ -106,21 +106,17 @@ pub fn upload_s3(
         .map_err(|e| format!("Failed to initialize bucket '{}': {}", bucket_name, e))?;
 
     log::info!("Uploading to S3 (bucket: {}, key: {}) via rust-s3...", bucket_name, key);
-    
-    // TODO: Use `bucket.put_object_stream` to avoid loading the entire file
-    // into memory. For large video outputs (50-200+ MB), this doubles peak RSS.
-    let data = std::fs::read(local_path)
-        .map_err(|e| format!("Failed to read local file {}: {}", local_path, e))?;
 
-    let response = bucket.put_object(&key, &data)
+    // Stream from the file handle so large video outputs (50-200+ MB) never
+    // sit in memory in full.
+    let mut file = File::open(local_path)
+        .map_err(|e| format!("Failed to open local file {}: {}", local_path, e))?;
+
+    let status_code = bucket.put_object_stream(&mut file, &key)
         .map_err(|e| format!("S3 PUT failed: {}", e))?;
 
-    if response.status_code() < 200 || response.status_code() >= 300 {
-        return Err(format!(
-            "S3 PUT failed with status code {}: {}",
-            response.status_code(),
-            String::from_utf8_lossy(response.bytes())
-        ));
+    if status_code < 200 || status_code >= 300 {
+        return Err(format!("S3 PUT failed with status code {}", status_code));
     }
 
     log::info!("Upload successful.");
@@ -173,21 +169,17 @@ pub fn upload_gcs(
         .map_err(|e| format!("Failed to initialize GCS bucket '{}': {}", bucket_name, e))?;
 
     log::info!("Uploading to GCS (bucket: {}, key: {}) via rust-s3...", bucket_name, key);
-    
-    // TODO: Use `bucket.put_object_stream` to avoid loading the entire file
-    // into memory. For large video outputs (50-200+ MB), this doubles peak RSS.
-    let data = std::fs::read(local_path)
-        .map_err(|e| format!("Failed to read local file {}: {}", local_path, e))?;
 
-    let response = bucket.put_object(&key, &data)
+    // Stream from the file handle so large video outputs (50-200+ MB) never
+    // sit in memory in full.
+    let mut file = File::open(local_path)
+        .map_err(|e| format!("Failed to open local file {}: {}", local_path, e))?;
+
+    let status_code = bucket.put_object_stream(&mut file, &key)
         .map_err(|e| format!("GCS PUT failed: {}", e))?;
 
-    if response.status_code() < 200 || response.status_code() >= 300 {
-        return Err(format!(
-            "GCS PUT failed with status code {}: {}",
-            response.status_code(),
-            String::from_utf8_lossy(response.bytes())
-        ));
+    if status_code < 200 || status_code >= 300 {
+        return Err(format!("GCS PUT failed with status code {}", status_code));
     }
 
     log::info!("Upload successful.");

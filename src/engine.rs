@@ -112,6 +112,12 @@ pub fn pack_custom_params(
 
         // 4. Evaluate and pack based on type
         if is_vec2 {
+            // WGSL std140 requires vec2<f32> to start on an 8-byte boundary.
+            // Insert padding so the shader's struct field lands where it
+            // expects, rather than 4 bytes early after an odd scalar run.
+            if buffer.len() % 8 != 0 {
+                buffer.resize(buffer.len() + 4, 0);
+            }
             let v = crate::config::evaluate_vec2(val, clip_time, duration, width, height, [0.0, 0.0]);
             buffer.extend_from_slice(bytemuck::bytes_of(&v[0]));
             buffer.extend_from_slice(bytemuck::bytes_of(&v[1]));
@@ -257,6 +263,36 @@ fn create_default_view(texture: &wgpu::Texture) -> wgpu::TextureView {
 /// pair reserved for **temporal effects** (e.g. optical flow displacement).
 /// They carry state across frames so that each frame can read the previous
 /// frame's feedback output while writing a new one.
+/// Timeline data derived once from the immutable spec and reused for every
+/// frame. `get_clip_start_times` and `resolve_transitions` are pure functions
+/// of the spec — and the latter clones every [`Transition`] on each call — so
+/// deriving them per-frame is wasted work that scales with the frame count.
+pub struct Timeline {
+    tracks: Vec<TrackTimeline>,
+}
+
+struct TrackTimeline {
+    /// Absolute start time of each clip, parallel to the track's `clips`.
+    start_times: Vec<f32>,
+    /// Resolved `(transition, start_time)` pairs for the track.
+    resolved_transitions: Vec<(Transition, f32)>,
+}
+
+impl Timeline {
+    /// Builds the per-track timeline once from the spec.
+    pub fn build(spec: &RenderSpec) -> Self {
+        let tracks = spec
+            .tracks
+            .iter()
+            .map(|track| TrackTimeline {
+                start_times: track.get_clip_start_times(),
+                resolved_transitions: track.resolve_transitions(),
+            })
+            .collect();
+        Timeline { tracks }
+    }
+}
+
 pub struct RenderContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -335,15 +371,37 @@ impl RenderContext {
     /// Walks every track bottom-to-top, composites active media/solid clips,
     /// dispatches effect shaders, and returns the final RGBA pixel buffer
     /// with premultiplied alpha.
+    /// Renders a single frame, deriving the timeline from `spec` on the fly.
+    ///
+    /// Prefer [`render_frame_with_timeline`](Self::render_frame_with_timeline)
+    /// in a frame loop and build the [`Timeline`] once; this wrapper exists for
+    /// one-off callers (e.g. tests, single-image renders).
     pub fn render_frame(&self, time: f32, spec: &RenderSpec) -> Vec<u8> {
+        let timeline = Timeline::build(spec);
+        self.render_frame_with_timeline(time, spec, &timeline)
+    }
+
+    /// Renders a single frame using a precomputed [`Timeline`], avoiding
+    /// per-frame re-derivation (and per-frame `Transition` clones).
+    pub fn render_frame_with_timeline(
+        &self,
+        time: f32,
+        spec: &RenderSpec,
+        timeline: &Timeline,
+    ) -> Vec<u8> {
+        // Publish the absolute timeline time so the `time` expression variable
+        // resolves to the global position (distinct from per-clip `clip_time`).
+        crate::config::set_current_absolute_time(time);
+
         let mut current_input = &self.texture_a;
         let mut current_output = &self.texture_b;
 
         self.clear_canvas(current_input);
 
         // Process tracks from bottom to top (Z-order)
-        for track in &spec.tracks {
-            let start_times = track.get_clip_start_times();
+        for (track_idx, track) in spec.tracks.iter().enumerate() {
+            let track_timeline = &timeline.tracks[track_idx];
+            let start_times = &track_timeline.start_times;
             let mut active_clip_info = None;
             for (idx, clip) in track.clips.iter().enumerate() {
                 let absolute_start = start_times[idx];
@@ -353,7 +411,7 @@ impl RenderContext {
                 }
             }
 
-            let resolved_transitions = track.resolve_transitions();
+            let resolved_transitions = &track_timeline.resolved_transitions;
             let active_transition = resolved_transitions.iter().find(|(tr, start)| {
                 time >= *start && time <= *start + tr.duration
             });
@@ -952,13 +1010,18 @@ impl RenderContext {
     /// the mapped buffer contains padding bytes at the end of each row that
     /// must be stripped before the pixel data is usable.
     ///
-    /// # Premultiplied alpha conversion
+    /// # Alpha
     ///
-    /// The shader pipeline works in **straight (un-associated) alpha**, but
-    /// downstream consumers (PNG encoders, video muxers) expect
-    /// **premultiplied alpha**. This method multiplies each channel
-    /// (`R`, `G`, `B`) by `A / 255`, leaving `A` untouched, so that
-    /// semi-transparent regions composite correctly in the final output.
+    /// The shader pipeline works in **straight (un-associated) alpha** and
+    /// this method preserves it: pixels are returned exactly as composited,
+    /// with `R`, `G`, `B` independent of `A`. That is what PNG (and the
+    /// `image` crate's RGBA encoders) expect — premultiplying here would
+    /// darken every semi-transparent pixel in the saved file.
+    ///
+    /// The video path premultiplies separately (see
+    /// [`premultiply_alpha_on_black`] in `main.rs`) because ffmpeg drops the
+    /// alpha channel when converting to an opaque pixel format, and
+    /// premultiplied RGB is exactly the result of flattening onto black.
     fn readback_pixels(&self, source_texture: &wgpu::Texture, spec: &RenderSpec) -> Vec<u8> {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Readback Encoder"),
@@ -999,20 +1062,10 @@ impl RenderContext {
                 let start = (row * self.bytes_per_row) as usize;
                 let end = start + (spec.composition.width * 4) as usize;
                 let row_data = &data[start..end];
-                
-                // Premultiplied alpha: multiply RGB by normalised alpha using fast integer math
-                for chunk in row_data.chunks_exact(4) {
-                    let r = chunk[0] as u32;
-                    let g = chunk[1] as u32;
-                    let b = chunk[2] as u32;
-                    let a = chunk[3] as u32;
-                    
-                    unpadded_pixels[dest_idx] = ((r * a + 127) / 255) as u8;
-                    unpadded_pixels[dest_idx + 1] = ((g * a + 127) / 255) as u8;
-                    unpadded_pixels[dest_idx + 2] = ((b * a + 127) / 255) as u8;
-                    unpadded_pixels[dest_idx + 3] = a as u8;
-                    dest_idx += 4;
-                }
+
+                // Copy straight (un-premultiplied) alpha through unchanged.
+                unpadded_pixels[dest_idx..dest_idx + row_data.len()].copy_from_slice(row_data);
+                dest_idx += row_data.len();
             }
             drop(data);
             self.readback_buffer.unmap();
@@ -1021,5 +1074,81 @@ impl RenderContext {
             error!("Failed to map readback buffer back to CPU!");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    #[test]
+    fn vec2_is_padded_to_eight_byte_alignment() {
+        // Sorted keys: "a" (scalar, offset 0..4), then "z" (vec2). std140
+        // requires the vec2 at offset 8, so bytes 4..8 must be padding.
+        let mut params = std::collections::HashMap::new();
+        params.insert("a".to_string(), serde_json::json!(1.0));
+        params.insert("z".to_string(), serde_json::json!([2.0, 3.0]));
+
+        let buf = pack_custom_params(&params, 0.0, 1.0, 100, 100);
+
+        assert_eq!(&buf[0..4], bytemuck::bytes_of(&1.0f32), "scalar at offset 0");
+        assert_eq!(&buf[4..8], &[0u8; 4], "padding before vec2");
+        assert_eq!(&buf[8..12], bytemuck::bytes_of(&2.0f32), "vec2.x at offset 8");
+        assert_eq!(&buf[12..16], bytemuck::bytes_of(&3.0f32), "vec2.y at offset 12");
+    }
+
+    /// `Timeline::build` must preserve per-track order and produce exactly the
+    /// same start times and resolved transitions the per-track methods do — the
+    /// invariant that lets the frame loop reuse it instead of re-deriving (and
+    /// re-cloning every transition) each frame.
+    #[test]
+    fn timeline_matches_per_track_derivation() {
+        let spec_json = serde_json::json!({
+            "version": "1.0",
+            "output": "out.mp4",
+            "assets": {},
+            "audio_tracks": null,
+            "composition": { "width": 100, "height": 100, "fps": 30, "duration": 10.0 },
+            "tracks": [
+                {
+                    "id": "t0",
+                    "clips": [
+                        { "id": "a", "type": "solid", "asset": null, "duration": 2.0 },
+                        { "id": "b", "type": "solid", "asset": null, "duration": 3.0 }
+                    ],
+                    "transitions": [
+                        { "id": "x", "type": "fade", "duration": 1.0, "from": "a", "to": "b" }
+                    ]
+                },
+                {
+                    "id": "t1",
+                    "start": 1.5,
+                    "clips": [
+                        { "id": "c", "type": "solid", "asset": null, "duration": 4.0 }
+                    ]
+                }
+            ]
+        });
+        let spec: RenderSpec = serde_json::from_value(spec_json).expect("valid spec");
+
+        let timeline = Timeline::build(&spec);
+        assert_eq!(timeline.tracks.len(), spec.tracks.len());
+
+        for (track, tl) in spec.tracks.iter().zip(&timeline.tracks) {
+            assert_eq!(tl.start_times, track.get_clip_start_times());
+            let expected = track.resolve_transitions();
+            assert_eq!(tl.resolved_transitions.len(), expected.len());
+            for ((tr, start), (etr, estart)) in tl.resolved_transitions.iter().zip(&expected) {
+                assert_eq!(tr.id, etr.id);
+                assert_eq!(start, estart);
+            }
+        }
+
+        // Track 0: clips at 0.0 and 2.0; the (start-less) transition centers on
+        // the second clip's start, i.e. 2.0 - 0.5 * 1.0 = 1.5.
+        assert_eq!(timeline.tracks[0].start_times, vec![0.0, 2.0]);
+        assert_eq!(timeline.tracks[0].resolved_transitions[0].1, 1.5);
+        // Track 1 honours its 1.5s track-level start offset.
+        assert_eq!(timeline.tracks[1].start_times, vec![1.5]);
     }
 }

@@ -2115,6 +2115,7 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "naga",
  "pollster",
  "rust-s3",
  "serde",

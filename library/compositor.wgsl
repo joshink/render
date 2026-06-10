@@ -170,6 +170,55 @@ fn blend_colors(color_b: vec4<f32>, color_f: vec4<f32>, mode: u32) -> vec4<f32> 
 
 
 // ============================================================
+// BILINEAR MEDIA SAMPLING
+// ============================================================
+
+// Bilinearly sample the media texture at a fractional source-space
+// coordinate. Media is stored as STRAIGHT alpha, so we interpolate in
+// PREMULTIPLIED space and un-premultiply afterwards — otherwise the RGB of
+// fully transparent texels would bleed dark fringes into translucent edges.
+//
+// Texel convention matches the nearest-neighbour path: texel N covers
+// [N, N+1) in source space, so its center sits at N + 0.5. Sampling at a
+// texel center therefore returns that texel exactly (frac == 0), and a 1:1
+// unscaled clip stays pixel-perfect.
+fn sample_media_bilinear(src_pos: vec2<f32>, tex_size: vec2<u32>) -> vec4<f32> {
+    let centered = src_pos - vec2<f32>(0.5, 0.5);
+    let base = floor(centered);
+    let frac = centered - base;
+
+    let max_x = i32(tex_size.x) - 1;
+    let max_y = i32(tex_size.y) - 1;
+
+    // Clamp neighbour indices so edge texels are extended rather than wrapped.
+    let x0 = clamp(i32(base.x), 0, max_x);
+    let y0 = clamp(i32(base.y), 0, max_y);
+    let x1 = clamp(i32(base.x) + 1, 0, max_x);
+    let y1 = clamp(i32(base.y) + 1, 0, max_y);
+
+    let c00 = textureLoad(media_tex, vec2<i32>(x0, y0), 0);
+    let c10 = textureLoad(media_tex, vec2<i32>(x1, y0), 0);
+    let c01 = textureLoad(media_tex, vec2<i32>(x0, y1), 0);
+    let c11 = textureLoad(media_tex, vec2<i32>(x1, y1), 0);
+
+    // Premultiply, interpolate, then un-premultiply.
+    let p00 = vec4<f32>(c00.rgb * c00.a, c00.a);
+    let p10 = vec4<f32>(c10.rgb * c10.a, c10.a);
+    let p01 = vec4<f32>(c01.rgb * c01.a, c01.a);
+    let p11 = vec4<f32>(c11.rgb * c11.a, c11.a);
+
+    let top = mix(p00, p10, frac.x);
+    let bot = mix(p01, p11, frac.x);
+    let pm = mix(top, bot, frac.y);
+
+    if (pm.a > 0.0001) {
+        return vec4<f32>(pm.rgb / pm.a, pm.a);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+
+// ============================================================
 // MAIN COMPOSITING PASS — Transform, sample, blend per pixel
 // ============================================================
 
@@ -213,8 +262,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (params.clip_type == 1u) { // Solid
             fg_color = params.solid_color;
         } else { // Media
-            let sample_pos = vec2<i32>(local_coords);
-            fg_color = textureLoad(media_tex, sample_pos, 0);
+            // A clip rendered at exactly 1:1 (unit scale, no rotation) maps
+            // output pixels onto source texels one-to-one, so nearest sampling
+            // is already pixel-perfect and avoids needless softening. Any scale
+            // or rotation introduces fractional source coordinates where
+            // bilinear filtering removes the blocky nearest-neighbour aliasing.
+            let scaled = params.scale.x != 1.0 || params.scale.y != 1.0;
+            let rotated = params.rotation != 0.0;
+            if (scaled || rotated) {
+                fg_color = sample_media_bilinear(local_coords, tex_size);
+            } else {
+                fg_color = textureLoad(media_tex, vec2<i32>(local_coords), 0);
+            }
         }
     }
 

@@ -1,7 +1,7 @@
 use log::{LevelFilter, error, info};
 use render_poc::config::*;
 use render_poc::download::fetch_remote_url;
-use render_poc::engine::{EngineParams, RenderContext, TransitionEngineParams};
+use render_poc::engine::{EngineParams, RenderContext, Timeline, TransitionEngineParams};
 use render_poc::upload::{upload_signed_url, upload_s3, upload_gcs};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -367,7 +367,10 @@ fn build_ffmpeg_args(
             for idx in 0..audio_clips.len() {
                 filter_complex.push_str(&format!("[a{}]", idx + 1));
             }
-            filter_complex.push_str(&format!("amix=inputs={}[aout]", audio_clips.len()));
+            // normalize=0 keeps each input at unity gain. Without it, amix
+            // divides every input's volume by the number of inputs, so mixing
+            // N clips would silently attenuate each to 1/N of its level.
+            filter_complex.push_str(&format!("amix=inputs={}:normalize=0[aout]", audio_clips.len()));
         }
 
         ffmpeg_args.push("-filter_complex".to_string());
@@ -378,16 +381,40 @@ fn build_ffmpeg_args(
         ffmpeg_args.push("[aout]".to_string());
         ffmpeg_args.push("-c:v".to_string());
         ffmpeg_args.push("libx264".to_string());
+        // yuv420p with even-dimension padding for the widest player support.
+        // Raw rgba input otherwise drives libx264 to yuv444p, which Safari,
+        // QuickTime, and most hardware decoders refuse to play.
+        ffmpeg_args.push("-pix_fmt".to_string());
+        ffmpeg_args.push("yuv420p".to_string());
         ffmpeg_args.push("-c:a".to_string());
         ffmpeg_args.push("aac".to_string());
         ffmpeg_args.push("-shortest".to_string());
     } else {
         ffmpeg_args.push("-c:v".to_string());
         ffmpeg_args.push("libx264".to_string());
+        ffmpeg_args.push("-pix_fmt".to_string());
+        ffmpeg_args.push("yuv420p".to_string());
     }
 
     ffmpeg_args.push(output_path.to_string());
     ffmpeg_args
+}
+
+/// Flattens straight-alpha RGBA onto black, in place, by premultiplying each
+/// channel by its alpha.
+///
+/// The render pipeline produces straight (un-associated) alpha. ffmpeg discards
+/// the alpha channel when encoding to an opaque format like yuv420p, so without
+/// this step semi-transparent pixels would keep their full-intensity RGB instead
+/// of fading toward black. Premultiplying here makes the dropped-alpha result
+/// identical to compositing the frame over a black background.
+fn premultiply_alpha_on_black(pixels: &mut [u8]) {
+    for chunk in pixels.chunks_exact_mut(4) {
+        let a = chunk[3] as u32;
+        chunk[0] = ((chunk[0] as u32 * a + 127) / 255) as u8;
+        chunk[1] = ((chunk[1] as u32 * a + 127) / 255) as u8;
+        chunk[2] = ((chunk[2] as u32 * a + 127) / 255) as u8;
+    }
 }
 
 // ─── Debug review output ──────────────────────────────────────────────────────
@@ -1195,8 +1222,12 @@ fn run_render_loop(
         path: if is_remote { Some(render_output_path.clone()) } else { None },
     };
 
+    // Derive the timeline (clip start times + resolved transitions) once; it is
+    // a pure function of the spec and would otherwise be recomputed for every
+    // frame, re-cloning every transition each time.
+    let timeline = Timeline::build(spec);
     let render_frame = |time: f32| -> Vec<u8> {
-        render_context.render_frame(time, spec)
+        render_context.render_frame_with_timeline(time, spec, &timeline)
     };
 
     if is_movie {
@@ -1221,9 +1252,11 @@ fn run_render_loop(
             let time = frame as f32 / fps as f32;
 
             let frame_render_start = Instant::now();
-            let unpadded_pixels = render_frame(time);
+            let mut unpadded_pixels = render_frame(time);
             *render_dur += frame_render_start.elapsed();
 
+            // Debug PNGs are saved with straight alpha (matching the final image
+            // path), so write them before flattening for the video stream.
             if let Some(ref run_dir) = run_dir_path {
                 if spot_check_frames.contains_key(&frame) {
                     let frame_save_path = run_dir.join("frames").join(format!("frame_{:04}.png", frame));
@@ -1237,6 +1270,10 @@ fn run_render_loop(
                     info!("Exported debug frame {} to {:?}", frame, frame_save_path);
                 }
             }
+
+            // ffmpeg drops alpha for yuv420p; flatten onto black so transparency
+            // resolves correctly instead of leaking full-intensity RGB.
+            premultiply_alpha_on_black(&mut unpadded_pixels);
 
             let frame_save_start = Instant::now();
             ffmpeg_stdin.write_all(&unpadded_pixels).expect("Failed to write raw frame to ffmpeg");
@@ -1562,5 +1599,32 @@ fn main() {
 
     if render_result.is_err() {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn premultiply_flattens_semi_transparent_toward_black() {
+        // Half-opaque mid-grey: each channel scales by 128/255 ≈ 0.502.
+        let mut px = vec![200u8, 100, 50, 128];
+        premultiply_alpha_on_black(&mut px);
+        assert_eq!(px, vec![100, 50, 25, 128]);
+    }
+
+    #[test]
+    fn premultiply_leaves_opaque_pixels_unchanged() {
+        let mut px = vec![10u8, 20, 30, 255];
+        premultiply_alpha_on_black(&mut px);
+        assert_eq!(px, vec![10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn premultiply_zeroes_fully_transparent_rgb() {
+        let mut px = vec![200u8, 100, 50, 0];
+        premultiply_alpha_on_black(&mut px);
+        assert_eq!(px, vec![0, 0, 0, 0]);
     }
 }
