@@ -81,6 +81,19 @@ Everything Render does is driven by one JSON spec. A minimal example:
 }
 ```
 
+The same spec in [KDL](https://kdl.dev) (`version` defaults to `"1.0"`):
+
+```kdl
+composition width=1920 height=1080 fps=30 duration=5.0
+output "output.mp4"
+
+image "bg" path="input.jpg"
+
+track "background" {
+    media "bg_clip" 5.0 asset="bg" scale_mode="fill"
+}
+```
+
 A spec has five top-level parts: `composition` (canvas + timing), `assets`
 (named inputs), `tracks` (Z-ordered visual layers of clips), and optional
 `presets` and `audio_tracks`. The output format follows the `output` file
@@ -111,6 +124,9 @@ adding more tracks. → [Tracks](./SPEC.md#35-tracks), [Clips](./SPEC.md#36-clip
 ```json
 { "id": "logo", "type": "media", "asset": "logo", "duration": 4.0, "blend_mode": "screen" }
 ```
+```kdl
+media "logo" 4.0 asset="logo" blend_mode="screen"
+```
 
 ### ✨ Built-in effects
 
@@ -121,6 +137,9 @@ is a [dynamic value](#-dynamic-expressions). → [Registered effects](./SPEC.md#
 
 ```json
 "effects": [ { "type": "glow", "params": { "intensity": 1.2, "threshold": 0.4 } } ]
+```
+```kdl
+fx { glow intensity=1.2 threshold=0.4 }
 ```
 
 ### 🧬 Custom WGSL shaders
@@ -134,6 +153,9 @@ it as a `shader` asset. Parameters bind by the
 ```json
 "effects": [ { "type": "crt", "params": { "scanlineIntensity": 0.4, "barrelDistortion": 0.2 } } ]
 ```
+```kdl
+fx { crt scanlineIntensity=0.4 barrelDistortion=0.2 }
+```
 
 ### 🎨 Color LUTs
 
@@ -146,6 +168,10 @@ interpolation; `amount` blends between the original and graded image.
 "assets": { "teal_orange": { "type": "lut", "path": "luts/teal_orange.cube" } },
 "effects": [ { "type": "lut", "params": { "lut": "teal_orange", "amount": 0.8 } } ]
 ```
+```kdl
+lut "teal_orange" path="luts/teal_orange.cube"        // asset
+fx { lut lut="teal_orange" amount=0.8 }               // clip effect
+```
 
 ### 🔀 Transitions
 
@@ -155,6 +181,9 @@ and `slide_switch` (35 mm projector swap). → [Transitions](./SPEC.md#39-transi
 
 ```json
 "transitions": [ { "id": "t1", "type": "fade", "from": "a", "to": "b", "duration": 1.0 } ]
+```
+```kdl
+fade "t1" from="a" to="b" dur=1.0                     // inside the track
 ```
 
 ### 📐 Structured text layout
@@ -170,6 +199,13 @@ with `alignment`, `spacing`, and `padding`. → [Text](./SPEC.md#312-text), [Lay
   ] }
 }
 ```
+```kdl
+text "headline" 5.0 {
+    vstack spacing=12 {
+        text "CREATIVE" font="title_font" size=64
+    }
+}
+```
 
 ### ✍️ Variable fonts
 
@@ -180,6 +216,9 @@ expression — so weight or width can animate over time. The bundled font is
 
 ```json
 "axes": { "wght": { "expression": "300.0 + 400.0 * (0.5 + 0.5 * sin(clip_time * 3.0))" } }
+```
+```kdl
+axes wght=(expr)"300.0 + 400.0 * (0.5 + 0.5 * sin(clip_time * 3.0))"
 ```
 
 ### 🎬 Text animation
@@ -192,6 +231,11 @@ opacity). → [Text transitions](./SPEC.md#312b-text-transitions)
 "entrance": { "type": "rise", "granularity": "letter", "delay": 0.05, "duration": 0.6,
   "start_transform": { "position_offset": [0.0, 40.0], "opacity": 0.0 } }
 ```
+```kdl
+enter "rise" granularity="letter" delay=0.05 dur=0.6 {
+    from opacity=0.0 { offset 0 40 }
+}
+```
 
 ### 🎚️ Dynamic expressions
 
@@ -202,6 +246,9 @@ the constant `pi`, and functions `sin cos tan abs sqrt pow min max clamp`. →
 
 ```json
 "position": { "expression": "[comp.width * 0.5 + 50.0 * sin(clip_time * 2.0), comp.height * 0.5]" }
+```
+```kdl
+position (expr)"[comp.width * 0.5 + 50.0 * sin(clip_time * 2.0), comp.height * 0.5]"
 ```
 
 ### 📈 Keyframing
@@ -214,6 +261,12 @@ Or animate by keyframes, interpolated with `linear`, `ease_in`, `ease_out`,
   { "time": 0.0, "value": 0.0, "easing": "ease_out" },
   { "time": 1.0, "value": 1.0 }
 ]
+```
+```kdl
+opacity {
+    key 0.0 0.0 ease="ease_out"
+    key 1.0 1.0
+}
 ```
 
 ### 🧩 Presets

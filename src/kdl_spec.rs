@@ -118,7 +118,7 @@ fn build_composition(node: &KdlNode) -> Result<Value, String> {
         m.insert("duration".into(), value_to_json(args[3]));
     }
     for (k, v) in properties(node) {
-        m.insert(k.to_string(), value_to_json(v));
+        m.insert(k.to_string(), value_to_json(v.value()));
     }
     for key in ["width", "height", "fps", "duration"] {
         if !m.contains_key(key) {
@@ -155,7 +155,7 @@ fn build_output(node: &KdlNode) -> Result<Value, String> {
                         }
                     }
                     for (k, v) in properties(c) {
-                        cred.insert(k.to_string(), value_to_json(v));
+                        cred.insert(k.to_string(), value_to_json(v.value()));
                     }
                     m.insert("credentials".into(), Value::Object(cred));
                 }
@@ -190,7 +190,7 @@ fn build_asset(node: &KdlNode) -> Result<(String, Value), String> {
         if k == "type" {
             continue;
         }
-        m.insert(k.to_string(), value_to_json(v));
+        m.insert(k.to_string(), value_to_json(v.value()));
     }
     if !m.contains_key("path") {
         return Err(format!("asset `{id}` is missing `path=`"));
@@ -244,13 +244,13 @@ fn build_transition(node: &KdlNode, idx: usize) -> Result<Value, String> {
     for (k, v) in properties(node) {
         match k {
             "from" | "to" | "shader" => {
-                m.insert(k.to_string(), value_to_json(v));
+                m.insert(k.to_string(), value_to_json(v.value()));
             }
             "at" | "start" => {
-                m.insert("start".into(), value_to_json(v));
+                m.insert("start".into(), value_to_json(v.value()));
             }
             "dur" | "duration" => {
-                m.insert("duration".into(), value_to_json(v));
+                m.insert("duration".into(), value_to_json(v.value()));
             }
             _ => {
                 params.insert(k.to_string(), dynamic_from_prop(v));
@@ -307,16 +307,16 @@ fn build_clip(node: &KdlNode, defs: &Defs) -> Result<Value, String> {
     for (k, v) in properties(node) {
         match k {
             "dur" | "duration" => {
-                m.insert("duration".into(), value_to_json(v));
+                m.insert("duration".into(), value_to_json(v.value()));
             }
             "asset" | "scale_mode" | "blend_mode" | "shader" | "preset" => {
-                m.insert(k.to_string(), value_to_json(v));
+                m.insert(k.to_string(), value_to_json(v.value()));
             }
             "offset" | "trim_start" => {
-                m.insert(k.to_string(), value_to_json(v));
+                m.insert(k.to_string(), value_to_json(v.value()));
             }
             "color" if clip_type == "solid" => {
-                color_prop = Some(color_to_json(v)?);
+                color_prop = Some(color_to_json(v.value())?);
             }
             _ => {
                 params.insert(k.to_string(), dynamic_from_prop(v));
@@ -375,16 +375,16 @@ fn build_clip(node: &KdlNode, defs: &Defs) -> Result<Value, String> {
         for (k, v) in properties(node) {
             match k {
                 "text" => {
-                    text_params.insert("text".into(), value_to_json(v));
+                    text_params.insert("text".into(), value_to_json(v.value()));
                 }
                 "font" => {
-                    text_params.insert("font".into(), value_to_json(v));
+                    text_params.insert("font".into(), value_to_json(v.value()));
                 }
                 "size" | "font_size" => {
                     text_params.insert("font_size".into(), dynamic_from_prop(v));
                 }
                 "color" => {
-                    text_params.insert("color".into(), color_to_json(v)?);
+                    text_params.insert("color".into(), color_to_json(v.value())?);
                 }
                 _ => {}
             }
@@ -441,7 +441,7 @@ fn build_effect(node: &KdlNode, defs: &Defs) -> Result<Value, String> {
         match k {
             "use" => {}
             "shader" | "preset" => {
-                m.insert(k.to_string(), value_to_json(v));
+                m.insert(k.to_string(), value_to_json(v.value()));
             }
             _ => {
                 params.insert(k.to_string(), dynamic_from_prop(v));
@@ -470,10 +470,10 @@ fn build_text_transition(node: &KdlNode, defs: &Defs) -> Result<Value, String> {
     for (k, v) in properties(node) {
         match k {
             "use" => {}
-            "type" => { m.insert("type".into(), value_to_json(v)); }
-            "dur" | "duration" => { m.insert("duration".into(), value_to_json(v)); }
-            "delay" => { m.insert("delay".into(), value_to_json(v)); }
-            _ => { m.insert(k.to_string(), value_to_json(v)); }
+            "type" => { m.insert("type".into(), value_to_json(v.value())); }
+            "dur" | "duration" => { m.insert("duration".into(), value_to_json(v.value())); }
+            "delay" => { m.insert("delay".into(), value_to_json(v.value())); }
+            _ => { m.insert(k.to_string(), value_to_json(v.value())); }
         }
     }
     // start_transform child: `from { opacity=0; scale=0.5; rotation=10; offset 0 40 }`
@@ -495,10 +495,10 @@ fn build_start_transform(node: &KdlNode) -> Result<Value, String> {
     for (k, v) in properties(node) {
         match k {
             "opacity" | "rotation" => {
-                m.insert(k.to_string(), value_to_json(v));
+                m.insert(k.to_string(), value_to_json(v.value()));
             }
             "scale" => {
-                m.insert("scale".into(), value_to_json(v));
+                m.insert("scale".into(), value_to_json(v.value()));
             }
             _ => return Err(format!("unknown start-transform property `{k}`")),
         }
@@ -544,20 +544,20 @@ fn build_layout_node(node: &KdlNode) -> Result<Value, String> {
 
     for (k, v) in properties(node) {
         match k {
-            "align" | "alignment" => { m.insert("alignment".into(), value_to_json(v)); }
+            "align" | "alignment" => { m.insert("alignment".into(), value_to_json(v.value())); }
             "spacing" => { m.insert("spacing".into(), dynamic_from_prop(v)); }
             "size" => { m.insert("size".into(), dynamic_from_prop(v)); }
-            "text" => { m.insert("text".into(), value_to_json(v)); }
-            "font" => { m.insert("font".into(), value_to_json(v)); }
+            "text" => { m.insert("text".into(), value_to_json(v.value())); }
+            "font" => { m.insert("font".into(), value_to_json(v.value())); }
             "size_px" | "font_size" => { m.insert("font_size".into(), dynamic_from_prop(v)); }
-            "color" => { m.insert("color".into(), color_to_json(v)?); }
+            "color" => { m.insert("color".into(), color_to_json(v.value())?); }
             _ => { m.insert(k.to_string(), dynamic_from_prop(v)); }
         }
     }
     // `size` on a text node means font size; keep `size` as fixed extent only
     // for spacers. Re-map a stray `size` prop for text into font_size.
     if kind == "text" {
-        if let Some(sz) = property(node, "size") {
+        if let Some(sz) = property_entry(node, "size") {
             m.insert("font_size".into(), dynamic_from_prop(sz));
             m.remove("size");
         }
@@ -615,7 +615,7 @@ fn build_audio_track(node: &KdlNode) -> Result<Value, String> {
             ));
             for (k, v) in properties(c) {
                 let key = if k == "dur" { "duration" } else { k };
-                cm.insert(key.to_string(), value_to_json(v));
+                cm.insert(key.to_string(), value_to_json(v.value()));
             }
             clips.push(Value::Object(cm));
         }
@@ -640,7 +640,7 @@ fn build_preset(node: &KdlNode, defs: &Defs) -> Result<Value, String> {
                 ));
                 for (k, v) in properties(c) {
                     let key = if k == "default" { "defaultValue" } else { k };
-                    im.insert(key.to_string(), value_to_json(v));
+                    im.insert(key.to_string(), value_to_json(v.value()));
                 }
                 inputs.push(Value::Object(im));
             } else {
@@ -655,10 +655,15 @@ fn build_preset(node: &KdlNode, defs: &Defs) -> Result<Value, String> {
 
 // ── Dynamic value handling ─────────────────────────────────────────────────
 
-/// A property value used where a dynamic value is expected: a constant scalar,
-/// or an `(expr)`-annotated expression string.
-fn dynamic_from_prop(v: &KdlValue) -> Value {
-    value_to_json(v)
+/// A property used where a dynamic value is expected: a constant scalar, or an
+/// `(expr)`-annotated expression string → `{ "expression": "…" }`.
+fn dynamic_from_prop(e: &kdl::KdlEntry) -> Value {
+    if e.ty().map(|t| t.value()) == Some("expr") {
+        if let Some(s) = e.value().as_string() {
+            return serde_json::json!({ "expression": s });
+        }
+    }
+    value_to_json(e.value())
 }
 
 /// Convert a child node standing in for a dynamic value into its JSON form:
@@ -875,11 +880,18 @@ fn positional_args(node: &KdlNode) -> Vec<&KdlValue> {
         .collect()
 }
 
-fn properties(node: &KdlNode) -> Vec<(&str, &KdlValue)> {
+fn properties(node: &KdlNode) -> Vec<(&str, &kdl::KdlEntry)> {
     node.entries()
         .iter()
-        .filter_map(|e| e.name().map(|n| (n.value(), e.value())))
+        .filter_map(|e| e.name().map(|n| (n.value(), e)))
         .collect()
+}
+
+fn property_entry<'a>(node: &'a KdlNode, key: &str) -> Option<&'a kdl::KdlEntry> {
+    node.entries()
+        .iter()
+        .filter(|e| e.name().map(|n| n.value()) == Some(key))
+        .last()
 }
 
 fn property<'a>(node: &'a KdlNode, key: &str) -> Option<&'a KdlValue> {
@@ -976,6 +988,38 @@ mod tests {
         assert_eq!(kf[0]["value"], 0.0);
         assert_eq!(kf[0]["easing"], "ease_out");
         assert_eq!(kf[3]["value"], 0.0);
+        assert_valid(src);
+    }
+
+    #[test]
+    fn expr_as_property() {
+        // `(expr)` on a `key=value` property (not just a child node) must expand
+        // to an expression object — covers transform fields and layout axes.
+        let src = r##"
+            composition width=1920 height=1080 fps=30 duration=5.0
+            output "out.mp4"
+            font "f" path="f.ttf" provider="local"
+            image "logo" path="logo.png"
+            track "t" {
+                media "m" 5.0 asset="logo" {
+                    transform opacity=(expr)"clip_time*2"
+                    fx { brightness factor=(expr)"1.0 + clip_time" }
+                }
+                text "h" 5.0 {
+                    vstack {
+                        text "X" font="f" size=64 {
+                            axes wght=(expr)"300.0 + 400.0 * sin(clip_time)"
+                        }
+                    }
+                }
+            }
+        "##;
+        let v = transpile(src);
+        let m = &v["tracks"][0]["clips"][0];
+        assert_eq!(m["transform"]["opacity"]["expression"], "clip_time*2");
+        assert_eq!(m["effects"][0]["params"]["factor"]["expression"], "1.0 + clip_time");
+        let axes = &v["tracks"][0]["clips"][1]["text_params"]["body"]["children"][0]["axes"];
+        assert_eq!(axes["wght"]["expression"], "300.0 + 400.0 * sin(clip_time)");
         assert_valid(src);
     }
 
