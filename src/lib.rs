@@ -14,5 +14,6 @@ pub mod config;
 pub mod download;
 pub mod engine;
 pub mod layout;
+pub mod lut;
 pub mod upload;
 

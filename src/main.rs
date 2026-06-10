@@ -321,6 +321,15 @@ fn load_asset_images(spec: &RenderSpec) -> HashMap<String, image::RgbaImage> {
                 info!("Loaded asset '{}' from {} ({}x{})", asset_id, path, img.width(), img.height());
                 cpu_images.insert(asset_id.clone(), img);
             }
+            Asset::Lut { path } => {
+                let resolved = resolve_asset_path(path);
+                let atlas = render_poc::lut::load_lut_atlas(&resolved);
+                info!(
+                    "Loaded LUT asset '{}' from {:?} (atlas {}x{})",
+                    asset_id, resolved, atlas.width(), atlas.height()
+                );
+                cpu_images.insert(asset_id.clone(), atlas);
+            }
             _ => {}
         }
     }
@@ -946,6 +955,19 @@ fn compile_pipelines(
                 },
                 count: None,
             },
+            // Binding 7: LUT atlas texture (color look-up tables). Sampled with
+            // manual trilinear interpolation via textureLoad, so no sampler is
+            // needed. Bound to the transparent fallback when the effect names no LUT.
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ],
     });
 
@@ -1450,6 +1472,15 @@ fn main() {
                     *path = fetch_remote_url(path).unwrap_or_else(|e| {
                         error!("Failed to fetch remote Shader asset '{}': {}", asset_id, e);
                         panic!("Failed to fetch remote Shader asset '{}': {}", asset_id, e);
+                    });
+                }
+            }
+            Asset::Lut { path } => {
+                if path.starts_with("http://") || path.starts_with("https://") {
+                    info!("Fetching remote LUT asset '{}' from URL: {}", asset_id, path);
+                    *path = fetch_remote_url(path).unwrap_or_else(|e| {
+                        error!("Failed to fetch remote LUT asset '{}': {}", asset_id, e);
+                        panic!("Failed to fetch remote LUT asset '{}': {}", asset_id, e);
                     });
                 }
             }

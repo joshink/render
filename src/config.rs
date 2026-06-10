@@ -202,6 +202,8 @@ pub enum Asset {
     Audio { path: String },
     #[serde(rename = "shader")]
     Shader { path: String },
+    #[serde(rename = "lut")]
+    Lut { path: String },
     #[serde(rename = "font")]
     Font { provider: String, path: String },
 }
@@ -957,6 +959,28 @@ pub fn eval_built_in_effects_from_effects(effects: &[Effect], clip_time: f32, du
         }
     }
     (grayscale, brightness)
+}
+
+/// Resolves the LUT asset id referenced by an effect whose metadata declares a
+/// `lut`-typed parameter. Mirrors [`get_depth_map_asset_id_from_effects`].
+pub fn get_lut_asset_id_from_effects(effects: &[Effect]) -> Option<String> {
+    let registry = get_effects_registry();
+    for effect in effects {
+        if let Some(meta) = registry.iter().find(|m| m.effect_type == effect.effect_type) {
+            for param in &meta.params {
+                if param.param_type == "lut" {
+                    if let Some(ref params) = effect.params {
+                        if let Some(val) = params.get(&param.name) {
+                            if let Some(s) = val.as_str() {
+                                return Some(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn get_depth_map_asset_id_from_effects(effects: &[Effect]) -> Option<String> {

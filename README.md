@@ -129,6 +129,18 @@ it as a `shader` asset. Parameters bind by the
 "effects": [ { "type": "crt", "params": { "scanlineIntensity": 0.4, "barrelDistortion": 0.2 } } ]
 ```
 
+### 🎨 Color LUTs
+
+Drop a `.cube` (Adobe/DaVinci Resolve, 1D or 3D) or HALD CLUT image into
+`library/luts/`, declare it as a `lut` asset, and apply it with the built-in
+`lut` effect. The LUT is uploaded as a strip atlas and sampled with trilinear
+interpolation; `amount` blends between the original and graded image.
+
+```json
+"assets": { "teal_orange": { "type": "lut", "path": "luts/teal_orange.cube" } },
+"effects": [ { "type": "lut", "params": { "lut": "teal_orange", "amount": 0.8 } } ]
+```
+
 ### 🔀 Transitions
 
 Cross-blend adjacent clips on a track. Built-ins: `fade`, `wipe`, `flash_burn`

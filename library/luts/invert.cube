@@ -1,0 +1,11 @@
+# 2x2x2 invert LUT (out = 1 - in). Trilinear-exact, for verification.
+TITLE "Invert"
+LUT_3D_SIZE 2
+1.0 1.0 1.0
+0.0 1.0 1.0
+1.0 0.0 1.0
+0.0 0.0 1.0
+1.0 1.0 0.0
+0.0 1.0 0.0
+1.0 0.0 0.0
+0.0 0.0 0.0

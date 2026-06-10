@@ -157,18 +157,20 @@ pub fn pack_effect_params(
 
         let mut buffer = Vec::new();
         for param in sorted_params {
-            if param.param_type == "depth_map" {
-                let mut has_map = 0i32;
+            if param.param_type == "depth_map" || param.param_type == "lut" {
+                // Asset-reference params bind a texture rather than a scalar; we
+                // pack only a presence flag so the shader knows whether to use it.
+                let mut has_asset = 0i32;
                 if let Some(ref map) = effect.params {
                     if let Some(val) = map.get(&param.name) {
                         if let Some(s) = val.as_str() {
                             if !s.is_empty() {
-                                has_map = 1;
+                                has_asset = 1;
                             }
                         }
                     }
                 }
-                buffer.extend_from_slice(bytemuck::bytes_of(&has_map));
+                buffer.extend_from_slice(bytemuck::bytes_of(&has_asset));
             } else {
                 let default_val = param.default;
                 let val_f32 = effect.params.as_ref()
@@ -820,6 +822,11 @@ impl RenderContext {
                 .unwrap_or(&self.transparent_texture);
             let depth_view = create_default_view(depth_texture_ref);
 
+            let lut_texture_ref = crate::config::get_lut_asset_id_from_effects(&[effect.clone()])
+                .and_then(|asset_id| self.gpu_textures.get(&asset_id))
+                .unwrap_or(&self.transparent_texture);
+            let lut_view = create_default_view(lut_texture_ref);
+
             let frame_idx = (time * spec.composition.fps as f32).round() as u32;
             let (feedback_in, feedback_out) = if frame_idx % 2 == 0 {
                 (&self.feedback_texture_a, &self.feedback_texture_b)
@@ -860,6 +867,10 @@ impl RenderContext {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: wgpu::BindingResource::TextureView(&feedback_out_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&lut_view),
                     },
                 ],
             });
