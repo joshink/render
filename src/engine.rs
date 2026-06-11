@@ -246,25 +246,6 @@ fn create_default_view(texture: &wgpu::Texture) -> wgpu::TextureView {
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-/// Holds all persistent GPU resources for the render pipeline.
-///
-/// A single `RenderContext` is created at startup and reused across every
-/// frame in the composition.
-///
-/// # Ping-pong textures
-///
-/// `texture_a` and `texture_b` form a **ping-pong pair**: each compute
-/// dispatch reads from one ("current input") and writes to the other
-/// ("current output"), then the references are swapped so the previous
-/// output becomes the next input. This avoids read-after-write hazards
-/// without ever allocating intermediate textures.
-///
-/// # Feedback textures
-///
-/// `feedback_texture_a` and `feedback_texture_b` are a second ping-pong
-/// pair reserved for **temporal effects** (e.g. optical flow displacement).
-/// They carry state across frames so that each frame can read the previous
-/// frame's feedback output while writing a new one.
 /// Timeline data derived once from the immutable spec and reused for every
 /// frame. `get_clip_start_times` and `resolve_transitions` are pure functions
 /// of the spec — and the latter clones every [`Transition`] on each call — so
@@ -295,6 +276,30 @@ impl Timeline {
     }
 }
 
+/// Holds all persistent GPU resources for the render pipeline.
+///
+/// A single `RenderContext` is created at startup and reused across every
+/// frame in the composition.
+///
+/// # Ping-pong textures
+///
+/// `texture_a` and `texture_b` form a **ping-pong pair**: each compute
+/// dispatch reads from one ("current input") and writes to the other
+/// ("current output"), then the references are swapped so the previous
+/// output becomes the next input. This avoids read-after-write hazards
+/// without ever allocating intermediate textures.
+///
+/// `texture_c` and `texture_d` are a separate scratch pair used only while a
+/// transition is active: the transition's `from` and `to` clips are each
+/// rendered off-screen into them before the transition shader blends the two
+/// results (see `render_frame_with_timeline`).
+///
+/// # Feedback textures
+///
+/// `feedback_texture_a` and `feedback_texture_b` are a second ping-pong
+/// pair reserved for **temporal effects** (e.g. optical flow displacement).
+/// They carry state across frames so that each frame can read the previous
+/// frame's feedback output while writing a new one.
 pub struct RenderContext {
     /// Shared with the per-worker GPU cache (see `pipeline::acquire_gpu`),
     /// so dropping a `RenderContext` does not tear the device down between
@@ -315,9 +320,11 @@ pub struct RenderContext {
     pub texture_a: wgpu::Texture,
     /// Ping-pong texture B (see struct-level docs).
     pub texture_b: wgpu::Texture,
-    /// Ping-pong texture C (intermediate target).
+    /// Transition scratch texture (see struct-level docs) — not part of the
+    /// main ping-pong pair.
     pub texture_c: wgpu::Texture,
-    /// Ping-pong texture D (intermediate target).
+    /// Transition scratch texture (see struct-level docs) — not part of the
+    /// main ping-pong pair.
     pub texture_d: wgpu::Texture,
     /// Feedback texture A — temporal state for effects like flow.
     pub feedback_texture_a: wgpu::Texture,
@@ -373,11 +380,6 @@ impl RenderContext {
             output,
         );
     }
-    /// Renders a single frame of the composition at the given `time` (seconds).
-    ///
-    /// Walks every track bottom-to-top, composites active media/solid clips,
-    /// dispatches effect shaders, and returns the final RGBA pixel buffer
-    /// with premultiplied alpha.
     /// Renders a single frame, deriving the timeline from `spec` on the fly.
     ///
     /// Prefer [`render_frame_with_timeline`](Self::render_frame_with_timeline)
@@ -388,8 +390,13 @@ impl RenderContext {
         self.render_frame_with_timeline(time, spec, &timeline)
     }
 
-    /// Renders a single frame using a precomputed [`Timeline`], avoiding
-    /// per-frame re-derivation (and per-frame `Transition` clones).
+    /// Renders a single frame of the composition at the given `time` (seconds),
+    /// using a precomputed [`Timeline`] to avoid per-frame re-derivation (and
+    /// per-frame `Transition` clones).
+    ///
+    /// Walks every track bottom-to-top, composites active media/solid/text
+    /// clips, dispatches effect and transition shaders, and returns the final
+    /// RGBA pixel buffer with premultiplied alpha.
     pub fn render_frame_with_timeline(
         &self,
         time: f32,

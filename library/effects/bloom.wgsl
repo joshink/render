@@ -1,3 +1,16 @@
+/* EFFECTS_METADATA:
+{
+  "type": "bloom",
+  "params": [
+    { "name": "bloomIntensity", "type": "float", "default": 0.0 },
+    { "name": "bloomKnee", "type": "float", "default": 0.5 },
+    { "name": "bloomRadius", "type": "float", "default": 0.0 },
+    { "name": "bloomThreshold", "type": "float", "default": 0.7 },
+    { "name": "highlightDrive", "type": "float", "default": 1.0 }
+  ]
+}
+*/
+
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
 @group(0) @binding(1) var output_tex: texture_storage_2d<rgba8unorm, write>;
 
@@ -14,7 +27,6 @@ struct CustomParams {
     bloomIntensity: f32,
     bloomKnee: f32,
     bloomRadius: f32,
-    bloomSoftness: f32,
     bloomThreshold: f32,
     highlightDrive: f32,
 }

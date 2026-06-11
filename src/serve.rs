@@ -20,6 +20,10 @@
 //! then evicted by a janitor thread; without eviction the registry would grow
 //! for the life of the server. Eviction never interrupts a live SSE stream —
 //! subscribers hold their own clone of the job's watch channel.
+//!
+//! Lock-poisoning policy: all shared mutexes are accessed via
+//! `lock_unpoisoned`, which recovers a poisoned lock instead of giving up.
+//! See its doc comment for why this is sound here.
 
 use crate::config::REMOTE_SCHEMES;
 use crate::pipeline::{self, Progress, RenderOptions};
@@ -33,7 +37,7 @@ use log::{error, info, warn};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -106,6 +110,17 @@ type ExpiryQueue = Arc<Mutex<VecDeque<(Instant, String)>>>;
 struct AppState {
     registry: Registry,
     queue: mpsc::SyncSender<QueueItem>,
+}
+
+/// Locks a shared mutex, recovering it if a panicking thread poisoned it.
+///
+/// Every operation performed under these locks is a single, panic-free map or
+/// queue insert/remove, so a poisoned lock never guards half-mutated data —
+/// the contents are still valid. The alternatives are all worse: propagating
+/// the poison would permanently disable eviction (janitor), kill a worker, or
+/// turn every status request into a 500 for the life of the server.
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 pub struct ServeOptions {
@@ -209,13 +224,13 @@ fn janitor_loop(registry: Registry, expiry: ExpiryQueue) {
         let now = Instant::now();
         let mut due = Vec::new();
         {
-            let Ok(mut queue) = expiry.lock() else { return };
+            let mut queue = lock_unpoisoned(&expiry);
             while queue.front().is_some_and(|(evict_at, _)| *evict_at <= now) {
                 due.push(queue.pop_front().expect("front checked above").1);
             }
         }
         if !due.is_empty() {
-            let Ok(mut registry) = registry.lock() else { return };
+            let mut registry = lock_unpoisoned(&registry);
             for id in &due {
                 registry.remove(id);
             }
@@ -259,10 +274,7 @@ fn worker_loop(
     loop {
         // Hold the lock only while waiting for the next item so other idle
         // workers can take subsequent jobs.
-        let item = match queue_rx.lock() {
-            Ok(rx) => rx.recv(),
-            Err(_) => break,
-        };
+        let item = lock_unpoisoned(&queue_rx).recv();
         let Ok(QueueItem { id, spec, tx }) = item else {
             break; // queue sender dropped: server is shutting down
         };
@@ -309,9 +321,7 @@ fn worker_loop(
 
         // Schedule this job's registry entry for eviction once its retention
         // lapses; every queued job passes through here exactly once.
-        if let Ok(mut queue) = expiry.lock() {
-            queue.push_back((Instant::now() + JOB_RETENTION, id));
-        }
+        lock_unpoisoned(&expiry).push_back((Instant::now() + JOB_RETENTION, id));
     }
 }
 
@@ -332,7 +342,7 @@ fn error_response(status: StatusCode, message: String) -> Response {
 }
 
 fn lookup_job(registry: &Registry, id: &str) -> Option<watch::Receiver<JobState>> {
-    registry.lock().unwrap().get(id).cloned()
+    lock_unpoisoned(registry).get(id).cloned()
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -378,7 +388,7 @@ async fn submit_render(State(state): State<AppState>, headers: HeaderMap, body: 
 
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = watch::channel(JobState::queued());
-    state.registry.lock().unwrap().insert(id.clone(), rx);
+    lock_unpoisoned(&state.registry).insert(id.clone(), rx);
 
     match state.queue.try_send(QueueItem { id: id.clone(), spec, tx }) {
         Ok(()) => {
@@ -395,12 +405,12 @@ async fn submit_render(State(state): State<AppState>, headers: HeaderMap, body: 
                 .into_response()
         }
         Err(mpsc::TrySendError::Full(_)) => {
-            state.registry.lock().unwrap().remove(&id);
+            lock_unpoisoned(&state.registry).remove(&id);
             warn!("Render queue full, rejecting job");
             error_response(StatusCode::SERVICE_UNAVAILABLE, "Render queue is full, retry later".into())
         }
         Err(mpsc::TrySendError::Disconnected(_)) => {
-            state.registry.lock().unwrap().remove(&id);
+            lock_unpoisoned(&state.registry).remove(&id);
             error_response(StatusCode::SERVICE_UNAVAILABLE, "Render workers are not running".into())
         }
     }

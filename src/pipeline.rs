@@ -330,9 +330,8 @@ fn load_font_assets(spec: &RenderSpec) -> HashMap<String, Vec<u8>> {
 
 // ─── GPU initialisation ──────────────────────────────────────────────────────
 
-/// Creates the wgpu instance, selects a high-performance adapter, and opens
-/// the device + queue. Returns `(device, queue, adapter_name)`.
-/// One thread's cached GPU handle, shared across the renders that thread runs.
+/// One thread's cached GPU handle — `(device, queue, adapter_name)` — shared
+/// across the renders that thread runs.
 type GpuHandle = (std::sync::Arc<wgpu::Device>, std::sync::Arc<wgpu::Queue>, String);
 
 thread_local! {
@@ -375,6 +374,8 @@ fn acquire_gpu() -> Result<GpuHandle, String> {
     })
 }
 
+/// Creates the wgpu instance, selects a high-performance adapter, and opens
+/// the device + queue.
 fn init_gpu() -> Result<GpuHandle, String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -608,6 +609,70 @@ fn collect_wgsl_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) 
     }
 }
 
+/// Bind-group layout entry for a sampled (non-filterable) 2D texture.
+fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// Bind-group layout entry for a write-only RGBA8 storage texture.
+fn storage_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            view_dimension: wgpu::TextureViewDimension::D2,
+        },
+        count: None,
+    }
+}
+
+/// Bind-group layout entry for a uniform buffer.
+fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+/// Compiles a WGSL source string into a compute pipeline (entry point `main`)
+/// with the given pipeline layout.
+fn compile_compute(
+    device: &wgpu::Device,
+    label: &str,
+    source: &str,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::ComputePipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        module: &module,
+        entry_point: "main",
+        cache: None,
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+    })
+}
+
 fn compile_pipelines(
     device: &wgpu::Device,
     spec: &RenderSpec,
@@ -618,54 +683,16 @@ fn compile_pipelines(
     let compositor_path = lib_path.join("compositor.wgsl");
     let compositor_shader_str = std::fs::read_to_string(&compositor_path)
         .map_err(|e| format!("Failed to read compositor.wgsl from {:?}: {}", compositor_path, e))?;
-    let compositor_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Compositor Shader"),
-        source: wgpu::ShaderSource::Wgsl(compositor_shader_str.into()),
-    });
 
+    // Bindings: 0 = canvas (input), 1 = clip media texture, 2 = output,
+    // 3 = CompositorParams uniform. Must match compositor.wgsl.
     let compositor_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Compositor Bind Group Layout"),
         entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
+            texture_entry(0),
+            texture_entry(1),
+            storage_texture_entry(2),
+            uniform_entry(3),
         ],
     });
 
@@ -675,101 +702,28 @@ fn compile_pipelines(
         push_constant_ranges: &[],
     });
 
-    let compositor_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Compositor Pipeline"),
-        layout: Some(&compositor_pipeline_layout),
-        module: &compositor_shader,
-        entry_point: "main",
-        cache: None,
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-    });
+    let compositor_pipeline =
+        compile_compute(device, "Compositor Pipeline", &compositor_shader_str, &compositor_pipeline_layout);
 
+    // Bindings: 0 = input, 1 = output, 2 = EngineParams uniform,
+    // 3 = CustomParams uniform, 4 = depth map, 5 = feedback in,
+    // 6 = feedback out, 7 = LUT atlas. Must match the effect-shader contract
+    // (see SPEC.md §7). Unused texture slots are bound to the transparent
+    // fallback texture.
+    //
+    // The LUT atlas (7) is sampled with manual trilinear interpolation via
+    // textureLoad, so no sampler is needed.
     let effect_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Effect Bind Group Layout"),
         entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 5,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 6,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            },
-            // Binding 7: LUT atlas texture (color look-up tables). Sampled with
-            // manual trilinear interpolation via textureLoad, so no sampler is
-            // needed. Bound to the transparent fallback when the effect names no LUT.
-            wgpu::BindGroupLayoutEntry {
-                binding: 7,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
+            texture_entry(0),
+            storage_texture_entry(1),
+            uniform_entry(2),
+            uniform_entry(3),
+            texture_entry(4),
+            texture_entry(5),
+            storage_texture_entry(6),
+            texture_entry(7),
         ],
     });
 
@@ -779,59 +733,17 @@ fn compile_pipelines(
         push_constant_ranges: &[],
     });
 
+    // Bindings: 0 = "from" clip texture, 1 = "to" clip texture, 2 = output,
+    // 3 = TransitionEngineParams uniform, 4 = custom params uniform. Must
+    // match the transition-shader contract.
     let transition_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Transition Bind Group Layout"),
         entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
+            texture_entry(0),
+            texture_entry(1),
+            storage_texture_entry(2),
+            uniform_entry(3),
+            uniform_entry(4),
         ],
     });
 
@@ -890,19 +802,8 @@ fn compile_pipelines(
                     let transition_type = meta.transition_type.clone();
                     registry.register_transition(meta);
 
-                    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                        label: Some(&transition_type),
-                        source: wgpu::ShaderSource::Wgsl(shader_str.into()),
-                    });
-                    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some(&transition_type),
-                        layout: Some(&transition_pipeline_layout),
-                        module: &shader_module,
-                        entry_point: "main",
-                        cache: None,
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    });
-                    custom_shader_pipelines.insert(transition_type.clone(), pipeline);
+                    let pipeline = compile_compute(device, &transition_type, &shader_str, &transition_pipeline_layout);
+                    custom_shader_pipelines.insert(transition_type, pipeline);
                 }
                 Err(e) => {
                     log::error!("Failed to parse transition metadata in {:?}: {}", file_path, e);
@@ -915,21 +816,10 @@ fn compile_pipelines(
                     let effect_type = meta.effect_type.clone();
                     registry.register_effect(meta);
 
-                    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                        label: Some(&effect_type),
-                        source: wgpu::ShaderSource::Wgsl(shader_str.into()),
-                    });
                     let is_tr = transition_shaders.contains(&effect_type) || is_transition;
                     let layout = if is_tr { &transition_pipeline_layout } else { &effect_pipeline_layout };
-                    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some(&effect_type),
-                        layout: Some(layout),
-                        module: &shader_module,
-                        entry_point: "main",
-                        cache: None,
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    });
-                    custom_shader_pipelines.insert(effect_type.clone(), pipeline);
+                    let pipeline = compile_compute(device, &effect_type, &shader_str, layout);
+                    custom_shader_pipelines.insert(effect_type, pipeline);
                 }
                 Err(e) => {
                     log::error!("Failed to parse metadata in {:?}: {}", file_path, e);
@@ -937,19 +827,8 @@ fn compile_pipelines(
             }
         } else {
             info!("Compiling shader without metadata: {} from {:?}", file_stem, file_path);
-            let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(&file_stem),
-                source: wgpu::ShaderSource::Wgsl(shader_str.into()),
-            });
             let layout = if is_transition { &transition_pipeline_layout } else { &effect_pipeline_layout };
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(&file_stem),
-                layout: Some(layout),
-                module: &shader_module,
-                entry_point: "main",
-                cache: None,
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            });
+            let pipeline = compile_compute(device, &file_stem, &shader_str, layout);
             custom_shader_pipelines.insert(file_stem.clone(), pipeline);
         }
     }
@@ -975,19 +854,8 @@ fn compile_pipelines(
                 let is_tr = transition_shaders.contains(asset_id)
                     || shader_str.contains("TransitionEngineParams")
                     || shader_str.contains("tex_to");
-                let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(asset_id),
-                    source: wgpu::ShaderSource::Wgsl(shader_str.into()),
-                });
                 let layout = if is_tr { &transition_pipeline_layout } else { &effect_pipeline_layout };
-                let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(asset_id),
-                    layout: Some(layout),
-                    module: &shader_module,
-                    entry_point: "main",
-                    cache: None,
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                });
+                let pipeline = compile_compute(device, asset_id, &shader_str, layout);
                 custom_shader_pipelines.insert(asset_id.clone(), pipeline);
                 info!("Compiled spec-declared {} shader pipeline: {}", if is_tr { "transition" } else { "effect" }, asset_id);
             }

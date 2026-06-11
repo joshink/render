@@ -1013,6 +1013,72 @@ fn apply_keyframe_easing(progress: f32, easing: Option<&serde_json::Value>) -> f
     }
 }
 
+/// Minimum keyframe segment span used to avoid division by zero when two
+/// keyframes share (or nearly share) the same timestamp.
+const MIN_KEYFRAME_SPAN: f32 = 0.0001;
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + t * (b - a)
+}
+
+/// Shared keyframe-interpolation core behind [`evaluate_float`],
+/// [`evaluate_vec2`], and [`evaluate_vec4`].
+///
+/// Expects `arr` to be a keyframe array (`[{ "time": t, "value": v, "easing"?: e }, ...]`)
+/// and returns `None` if it isn't shaped like one — callers fall back to their
+/// other interpretations (literal, scalar broadcast, expression) or default.
+/// `parse_value` decodes a keyframe's `"value"` field into `T`; `lerp_t`
+/// interpolates between two decoded values.
+///
+/// Semantics: a single keyframe is a constant; `clip_time` before the first /
+/// after the last keyframe clamps to that keyframe's value; otherwise the
+/// surrounding pair is found and interpolated, with the easing taken from the
+/// segment-start keyframe (see [`apply_keyframe_easing`]). Malformed
+/// keyframes are skipped, matching the historical lenient behaviour.
+fn evaluate_keyframes<T: Copy>(
+    arr: &[serde_json::Value],
+    clip_time: f32,
+    parse_value: impl Fn(&serde_json::Value) -> Option<T>,
+    lerp_t: impl Fn(T, T, f32) -> T,
+) -> Option<T> {
+    if arr.is_empty() || !arr[0].is_object() || arr[0].get("time").is_none() {
+        return None;
+    }
+    let get_kf = |item: &serde_json::Value| -> Option<(f32, T)> {
+        let t = item.get("time")?.as_f64()? as f32;
+        let v = parse_value(item.get("value")?)?;
+        Some((t, v))
+    };
+
+    if arr.len() == 1 {
+        return get_kf(&arr[0]).map(|(_, v)| v);
+    }
+
+    // Clamp outside the keyframed range.
+    if let Some((t0, v0)) = get_kf(&arr[0]) {
+        if clip_time <= t0 {
+            return Some(v0);
+        }
+    }
+    if let Some((tn, vn)) = get_kf(&arr[arr.len() - 1]) {
+        if clip_time >= tn {
+            return Some(vn);
+        }
+    }
+
+    // Find the segment containing clip_time and interpolate within it.
+    for i in 0..arr.len() - 1 {
+        if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
+            if clip_time >= t1 && clip_time <= t2 {
+                let raw = (clip_time - t1) / (t2 - t1).max(MIN_KEYFRAME_SPAN);
+                let progress = apply_keyframe_easing(raw, arr[i].get("easing"));
+                return Some(lerp_t(v1, v2, progress));
+            }
+        }
+    }
+    None
+}
+
 /// Evaluates a JSON value as a single `f32`. The value may be:
 /// - A **literal number** — returned directly.
 /// - An **expression object** `{ "expression": "..." }` — evaluated via `evalexpr`.
@@ -1037,55 +1103,14 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, duration: f32, 
     }
     // Keyframe array: [{ "time": <f32>, "value": <f32> }, ...]
     if let Some(arr) = value.as_array() {
-        if arr.is_empty() {
-            return default;
-        }
-        if arr[0].is_object() && arr[0].get("time").is_some() {
-            let get_kf = |item: &serde_json::Value| -> Option<(f32, f32)> {
-                let t = item.get("time")?.as_f64()? as f32;
-                let v = item.get("value")?.as_f64()? as f32;
-                Some((t, v))
-            };
-
-            if arr.len() == 1 {
-                return get_kf(&arr[0]).map(|(_, v)| v).unwrap_or(default);
-            }
-
-            let first_kf = get_kf(&arr[0]);
-            let last_kf = get_kf(&arr[arr.len() - 1]);
-
-            if let Some((t0, v0)) = first_kf {
-                if clip_time <= t0 {
-                    return v0;
-                }
-            }
-            if let Some((tn, vn)) = last_kf {
-                if clip_time >= tn {
-                    return vn;
-                }
-            }
-
-            // Iterate over windows of 2
-            for i in 0..arr.len() - 1 {
-                if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
-                    if clip_time >= t1 && clip_time <= t2 {
-                        let raw = (clip_time - t1) / (t2 - t1).max(0.0001);
-                        let progress = apply_keyframe_easing(raw, arr[i].get("easing"));
-                        return v1 + progress * (v2 - v1);
-                    }
-                }
-            }
+        let parse = |v: &serde_json::Value| v.as_f64().map(|n| n as f32);
+        if let Some(v) = evaluate_keyframes(arr, clip_time, parse, lerp) {
+            return v;
         }
     }
     default
 }
 
-/// Evaluates a JSON value as an `[f32; 2]` vector. The value may be:
-/// - A **literal 2-element array** `[x, y]` — returned directly.
-/// - A **scalar number** — broadcast to `[n, n]`.
-/// - A **keyframe array** `[{ "time": t, "value": [x, y] }, ...]` — linearly interpolated.
-/// - An **expression object** with a bracketed pair `"[exprX, exprY]"` — each component evaluated.
-/// - `null` or unrecognised — returns `default`.
 /// Splits a string on commas that are not nested inside parentheses or
 /// brackets, so a vec2 expression like `clamp(x, 0, 1), y` separates into its
 /// two components rather than fragmenting the inner function arguments.
@@ -1108,6 +1133,12 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     parts
 }
 
+/// Evaluates a JSON value as an `[f32; 2]` vector. The value may be:
+/// - A **literal 2-element array** `[x, y]` — returned directly.
+/// - A **scalar number** — broadcast to `[n, n]`.
+/// - A **keyframe array** `[{ "time": t, "value": [x, y] }, ...]` — linearly interpolated.
+/// - An **expression object** with a bracketed pair `"[exprX, exprY]"` — each component evaluated.
+/// - `null` or unrecognised — returns `default`.
 pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, duration: f32, width: u32, height: u32, default: [f32; 2]) -> [f32; 2] {
     // Null → default
     if value.is_null() {
@@ -1121,56 +1152,20 @@ pub fn evaluate_vec2(value: &serde_json::Value, clip_time: f32, duration: f32, w
             }
         }
         // Keyframe array: [{ "time": t, "value": [x, y] | n }, ...]
-        if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
-            let get_kf = |item: &serde_json::Value| -> Option<(f32, [f32; 2])> {
-                let t = item.get("time")?.as_f64()? as f32;
-                let v_val = item.get("value")?;
-                let v = if let Some(v_arr) = v_val.as_array() {
-                    if v_arr.len() == 2 {
-                        let vx = v_arr[0].as_f64()? as f32;
-                        let vy = v_arr[1].as_f64()? as f32;
-                        [vx, vy]
-                    } else {
-                        return None;
-                    }
-                } else if let Some(v_num) = v_val.as_f64() {
-                    [v_num as f32, v_num as f32]
-                } else {
+        // A keyframe value may be a 2-element array or a scalar broadcast.
+        let parse = |v_val: &serde_json::Value| -> Option<[f32; 2]> {
+            if let Some(v_arr) = v_val.as_array() {
+                if v_arr.len() != 2 {
                     return None;
-                };
-                Some((t, v))
-            };
-
-            if arr.len() == 1 {
-                return get_kf(&arr[0]).map(|(_, v)| v).unwrap_or(default);
-            }
-
-            let first_kf = get_kf(&arr[0]);
-            let last_kf = get_kf(&arr[arr.len() - 1]);
-
-            if let Some((t0, v0)) = first_kf {
-                if clip_time <= t0 {
-                    return v0;
                 }
+                Some([v_arr[0].as_f64()? as f32, v_arr[1].as_f64()? as f32])
+            } else {
+                v_val.as_f64().map(|n| [n as f32; 2])
             }
-            if let Some((tn, vn)) = last_kf {
-                if clip_time >= tn {
-                    return vn;
-                }
-            }
-
-            // Iterate over windows of 2
-            for i in 0..arr.len() - 1 {
-                if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
-                    if clip_time >= t1 && clip_time <= t2 {
-                        let raw = (clip_time - t1) / (t2 - t1).max(0.0001);
-                        let progress = apply_keyframe_easing(raw, arr[i].get("easing"));
-                        let rx = v1[0] + progress * (v2[0] - v1[0]);
-                        let ry = v1[1] + progress * (v2[1] - v1[1]);
-                        return [rx, ry];
-                    }
-                }
-            }
+        };
+        let lerp2 = |a: [f32; 2], b: [f32; 2], t: f32| std::array::from_fn(|i| lerp(a[i], b[i], t));
+        if let Some(v) = evaluate_keyframes(arr, clip_time, parse, lerp2) {
+            return v;
         }
     }
     // Scalar number broadcast to both components
@@ -1226,62 +1221,25 @@ pub fn evaluate_vec4(value: &serde_json::Value, clip_time: f32, duration: f32, w
             return [r, g, b, a];
         }
         // Keyframes: [{ "time": t, "value": [r,g,b,a] | scalar }, ...]
-        if !arr.is_empty() && arr[0].is_object() && arr[0].get("time").is_some() {
-            let get_kf = |item: &serde_json::Value| -> Option<(f32, [f32; 4])> {
-                let t = item.get("time")?.as_f64()? as f32;
-                let v_val = item.get("value")?;
-                let v = if let Some(v_arr) = v_val.as_array() {
-                    if v_arr.len() == 4 {
-                        let vr = v_arr[0].as_f64()? as f32;
-                        let vg = v_arr[1].as_f64()? as f32;
-                        let vb = v_arr[2].as_f64()? as f32;
-                        let va = v_arr[3].as_f64()? as f32;
-                        [vr, vg, vb, va]
-                    } else {
-                        return None;
-                    }
-                } else if let Some(v_num) = v_val.as_f64() {
-                    let f = v_num as f32;
-                    [f, f, f, f]
-                } else {
+        // A keyframe value may be a 4-element array or a scalar broadcast.
+        let parse = |v_val: &serde_json::Value| -> Option<[f32; 4]> {
+            if let Some(v_arr) = v_val.as_array() {
+                if v_arr.len() != 4 {
                     return None;
-                };
-                Some((t, v))
-            };
-
-            if arr.len() == 1 {
-                return get_kf(&arr[0]).map(|(_, v)| v).unwrap_or(default);
-            }
-
-            let first_kf = get_kf(&arr[0]);
-            let last_kf = get_kf(&arr[arr.len() - 1]);
-
-            if let Some((t0, v0)) = first_kf {
-                if clip_time <= t0 {
-                    return v0;
                 }
+                Some([
+                    v_arr[0].as_f64()? as f32,
+                    v_arr[1].as_f64()? as f32,
+                    v_arr[2].as_f64()? as f32,
+                    v_arr[3].as_f64()? as f32,
+                ])
+            } else {
+                v_val.as_f64().map(|n| [n as f32; 4])
             }
-            if let Some((tn, vn)) = last_kf {
-                if clip_time >= tn {
-                    return vn;
-                }
-            }
-
-            // Iterate over windows of 2
-            for i in 0..arr.len() - 1 {
-                if let (Some((t1, v1)), Some((t2, v2))) = (get_kf(&arr[i]), get_kf(&arr[i + 1])) {
-                    if clip_time >= t1 && clip_time <= t2 {
-                        let raw = (clip_time - t1) / (t2 - t1).max(0.0001);
-                        let progress = apply_keyframe_easing(raw, arr[i].get("easing"));
-                        return [
-                            v1[0] + progress * (v2[0] - v1[0]),
-                            v1[1] + progress * (v2[1] - v1[1]),
-                            v1[2] + progress * (v2[2] - v1[2]),
-                            v1[3] + progress * (v2[3] - v1[3]),
-                        ];
-                    }
-                }
-            }
+        };
+        let lerp4 = |a: [f32; 4], b: [f32; 4], t: f32| std::array::from_fn(|i| lerp(a[i], b[i], t));
+        if let Some(v) = evaluate_keyframes(arr, clip_time, parse, lerp4) {
+            return v;
         }
     }
     if let Some(num) = value.as_f64() {

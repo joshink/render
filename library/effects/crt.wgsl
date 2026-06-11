@@ -1,3 +1,21 @@
+/* EFFECTS_METADATA:
+{
+  "type": "crt",
+  "params": [
+    { "name": "barrelDistortion", "type": "float", "default": 0.0 },
+    { "name": "brightness", "type": "float", "default": 1.0 },
+    { "name": "cellSize", "type": "float", "default": 3.0 },
+    { "name": "chromaticAberration", "type": "float", "default": 0.0 },
+    { "name": "crtMode", "type": "float", "default": 0.0 },
+    { "name": "flickerIntensity", "type": "float", "default": 0.0 },
+    { "name": "maskIntensity", "type": "float", "default": 0.0 },
+    { "name": "scanlineIntensity", "type": "float", "default": 0.0 },
+    { "name": "signalArtifacts", "type": "float", "default": 0.0 },
+    { "name": "vignetteIntensity", "type": "float", "default": 0.0 }
+  ]
+}
+*/
+
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
 @group(0) @binding(1) var output_tex: texture_storage_2d<rgba8unorm, write>;
 
@@ -12,22 +30,13 @@ struct EngineParams {
 
 struct CustomParams {
     barrelDistortion: f32,
-    beamFocus: f32,
     brightness: f32,
     cellSize: f32,
-    chromaRetention: f32,
     chromaticAberration: f32,
     crtMode: f32, // 0 = Slot Mask, 1 = Aperture Grille, 2 = Composite TV
     flickerIntensity: f32,
-    glitchIntensity: f32,
-    glitchSpeed: f32,
-    highlightDrive: f32,
-    highlightThreshold: f32,
     maskIntensity: f32,
-    persistence: f32,
     scanlineIntensity: f32,
-    shadowLift: f32,
-    shoulder: f32,
     signalArtifacts: f32,
     vignetteIntensity: f32,
 }
