@@ -51,6 +51,19 @@ cargo build --release
 cargo run --release -- spec.json
 ```
 
+**Install**
+
+```bash
+./install.sh                      # installs to ~/.local (no sudo)
+./install.sh --prefix /usr/local  # system-wide
+./install.sh --uninstall          # remove an installed copy
+```
+
+The installer builds the release binary, places it next to a copy of
+`library/` under `$PREFIX/lib/render-poc/`, and symlinks
+`$PREFIX/bin/render-poc` — so the installed command finds its shaders and
+fonts from any directory (see [Library Resolution](#library-resolution)).
+
 **Test**
 
 ```bash
@@ -417,8 +430,11 @@ shaders, fonts) at runtime, in this order:
 3. **Executable-relative** — walking up from the binary's location.
 
 > [!WARNING]
-> Running the installed binary from another directory without
+> Running a bare copied binary from another directory without
 > `RENDER_LIBRARY_PATH` set will fail to load the compositor shader and fonts.
+> Installs made with [`./install.sh`](#quick-start) are not affected: the
+> binary lives next to a copy of `library/`, so executable-relative
+> resolution (rule 3) always finds it.
 
 Full details, including per-asset path resolution, are in
 [SPEC.md §2.5](./SPEC.md#25-library--asset-resolution).
