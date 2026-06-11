@@ -1,11 +1,11 @@
 ---
 name: render
-description: Use the Render engine — a headless GPU video compositor that turns one JSON/KDL spec into a PNG or MP4. Use when authoring render specs, producing videos/stills with render-poc, or debugging render output. For modifying the engine itself, also read Agents.md.
+description: Use the Render engine — a headless GPU video compositor that turns one JSON/KDL spec into a PNG or MP4. Use when authoring render specs, producing videos/stills with render, or debugging render output. For modifying the engine itself, also read Agents.md.
 ---
 
 # Render (headless GPU video compositor)
 
-One declarative spec (JSON or KDL, chosen by file extension) → a PNG still or H.264/AAC MP4. Everything (compositing, effects, text, transitions) runs on the GPU via wgpu/WGSL. Binary name: `render-poc`.
+One declarative spec (JSON or KDL, chosen by file extension) → a PNG still or H.264/AAC MP4. Everything (compositing, effects, text, transitions) runs on the GPU via wgpu/WGSL. Binary name: `render`.
 
 ```bash
 cargo run --release -- spec.json                  # render
@@ -66,7 +66,7 @@ Clip types: `media`, `solid`, `text`, `effect`. Any numeric property accepts a c
 ## Server mode
 
 ```bash
-render-poc serve --port 8080 --concurrency 1
+render serve --port 8080 --concurrency 1
 curl -s -X POST localhost:8080/render -H 'Content-Type: application/json' --data @spec.json
 # → {"id":…,"status_url":…,"events_url":…}; stream progress: curl -N localhost:8080/render/<id>/events
 ```

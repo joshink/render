@@ -1,4 +1,4 @@
-//! # render-poc
+//! # render
 //!
 //! A headless GPU-accelerated video rendering engine. Reads a JSON render
 //! specification describing compositions of media clips, solid layers, text,

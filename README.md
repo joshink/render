@@ -60,8 +60,8 @@ cargo run --release -- spec.json
 ```
 
 The installer builds the release binary, places it next to a copy of
-`library/` under `$PREFIX/lib/render-poc/`, and symlinks
-`$PREFIX/bin/render-poc` — so the installed command finds its shaders and
+`library/` under `$PREFIX/lib/render/`, and symlinks
+`$PREFIX/bin/render` — so the installed command finds its shaders and
 fonts from any directory (see [Library Resolution](#library-resolution)).
 
 **Test**
@@ -74,14 +74,14 @@ cargo test --release   # progressive suite: filters → transitions → layout �
 
 ## Server Mode
 
-`render-poc serve` runs the engine as an HTTP service with an asynchronous job
+`render serve` runs the engine as an HTTP service with an asynchronous job
 API. Renders are long-running and GPU-bound, so `POST /render` never blocks on
 the render itself: it validates the spec, enqueues a job, and immediately
 returns a job id. A fixed pool of worker threads (`--concurrency`) processes
 the queue.
 
 ```bash
-render-poc serve --host 127.0.0.1 --port 8080 --concurrency 1 --queue-capacity 64
+render serve --host 127.0.0.1 --port 8080 --concurrency 1 --queue-capacity 64
 ```
 
 **Outputs must be remote destinations** (`s3://`, `gs://`, `mux://`, or a
@@ -170,7 +170,7 @@ expression grammar — lives in [SPEC.md](./SPEC.md).** Each feature below links
 to its section there.
 
 ✍️ **Prefer something more readable to hand-write?** Render also accepts a
-[KDL](https://kdl.dev) front-end — `render-poc timeline.kdl` transpiles to the
+[KDL](https://kdl.dev) front-end — `render timeline.kdl` transpiles to the
 same spec. The same eight-line timeline drops from ~80 lines of JSON to ~15,
 with comments, hex colors, and `def`/`use` reuse. See [KDL.md](./KDL.md)
 (`--emit-json` shows what any `.kdl` compiles to).
@@ -363,8 +363,8 @@ Override any spec field at the command line without editing JSON — handy for
 batch rendering. → [CLI](./SPEC.md#2-command-line-interface)
 
 ```bash
-render-poc spec.json --width 1280 --height 720 --fps 60 -o out/720p.mp4
-render-poc spec.json --set composition.duration=10.0
+render spec.json --width 1280 --height 720 --fps 60 -o out/720p.mp4
+render spec.json --set composition.duration=10.0
 ```
 
 ### 🔬 Debug suite

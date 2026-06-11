@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# install.sh — build and install the Render engine (render-poc).
+# install.sh — build and install the Render engine (render).
 #
 # Layout:
-#   $PREFIX/lib/render-poc/render-poc   the release binary
-#   $PREFIX/lib/render-poc/library/     shaders, fonts, LUTs (resolved
+#   $PREFIX/lib/render/render   the release binary
+#   $PREFIX/lib/render/library/     shaders, fonts, LUTs (resolved
 #                                       executable-relative at runtime)
-#   $PREFIX/bin/render-poc              symlink to the binary
+#   $PREFIX/bin/render              symlink to the binary
 #
 # Usage:
 #   ./install.sh [--prefix DIR] [--uninstall]
@@ -36,8 +36,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_DIR="$PREFIX/lib/render-poc"
-BIN_LINK="$PREFIX/bin/render-poc"
+APP_DIR="$PREFIX/lib/render"
+BIN_LINK="$PREFIX/bin/render"
 
 if [[ $UNINSTALL -eq 1 ]]; then
     echo "Removing $APP_DIR and $BIN_LINK"
@@ -67,19 +67,19 @@ cargo build --release --locked --manifest-path "$REPO_DIR/Cargo.toml"
 
 echo "Installing to $APP_DIR"
 mkdir -p "$APP_DIR" "$PREFIX/bin"
-install -m 755 "$REPO_DIR/target/release/render-poc" "$APP_DIR/render-poc"
+install -m 755 "$REPO_DIR/target/release/render" "$APP_DIR/render"
 
 # Sync the library (shaders/fonts/LUTs); remove a stale copy first so deleted
 # files don't linger.
 rm -rf "$APP_DIR/library"
 cp -R "$REPO_DIR/library" "$APP_DIR/library"
 
-ln -sf "$APP_DIR/render-poc" "$BIN_LINK"
+ln -sf "$APP_DIR/render" "$BIN_LINK"
 
 # ── Verify ────────────────────────────────────────────────────────────────────
 
 "$BIN_LINK" --help >/dev/null
-echo "Installed: $("$BIN_LINK" --version 2>/dev/null || echo "render-poc → $BIN_LINK")"
+echo "Installed: $("$BIN_LINK" --version 2>/dev/null || echo "render → $BIN_LINK")"
 
 case ":$PATH:" in
     *":$PREFIX/bin:"*) ;;

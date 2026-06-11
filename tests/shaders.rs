@@ -156,17 +156,17 @@ fn param_contract_violations(path: &Path, source: &str) -> Vec<String> {
     }
 
     // Metadata, when present, must parse and match the struct exactly.
-    let metadata_params: Option<Vec<render_poc::config::EffectParamMetadata>> =
-        if let Some(json) = render_poc::config::extract_metadata(source) {
-            match serde_json::from_str::<render_poc::config::EffectMetadata>(&json) {
+    let metadata_params: Option<Vec<render::config::EffectParamMetadata>> =
+        if let Some(json) = render::config::extract_metadata(source) {
+            match serde_json::from_str::<render::config::EffectMetadata>(&json) {
                 Ok(meta) => Some(meta.params),
                 Err(e) => {
                     violations.push(format!("{:?}: EFFECTS_METADATA does not parse: {}", path, e));
                     None
                 }
             }
-        } else if let Some(json) = render_poc::config::extract_transition_metadata(source) {
-            match serde_json::from_str::<render_poc::config::TransitionMetadata>(&json) {
+        } else if let Some(json) = render::config::extract_transition_metadata(source) {
+            match serde_json::from_str::<render::config::TransitionMetadata>(&json) {
                 Ok(meta) => Some(meta.params),
                 Err(e) => {
                     violations.push(format!("{:?}: TRANSITION_METADATA does not parse: {}", path, e));

@@ -1,7 +1,7 @@
 use log::{error, LevelFilter};
-use render_poc::config::sort_value_keyframes;
-use render_poc::pipeline::{self, RenderOptions};
-use render_poc::serve::{serve, ServeOptions};
+use render::config::sort_value_keyframes;
+use render::pipeline::{self, RenderOptions};
+use render::serve::{serve, ServeOptions};
 use std::fs::File;
 use std::io::Write;
 use std::sync::Mutex;
@@ -46,7 +46,7 @@ static LOGGER: DualLogger = DualLogger {
 // ─── CLI argument parsing ─────────────────────────────────────────────────────
 
 #[derive(clap::Parser, Debug)]
-#[command(name = "render-poc", version = "0.1.0", about = "Headless GPU-accelerated video rendering engine")]
+#[command(name = "render", version = "0.1.0", about = "Headless GPU-accelerated video rendering engine")]
 struct Opts {
     #[command(subcommand)]
     command: Option<Command>,

@@ -38,10 +38,10 @@ H.264/AAC video.
 ### 2.1 Synopsis
 
 ```
-render-poc [OPTIONS] <SPEC_PATH>
+render [OPTIONS] <SPEC_PATH>
 ```
 
-The binary is named `render-poc`. Exactly one render specification is processed
+The binary is named `render`. Exactly one render specification is processed
 per invocation.
 
 ### 2.2 Options

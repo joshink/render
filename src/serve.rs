@@ -1,4 +1,4 @@
-//! HTTP server mode (`render-poc serve`).
+//! HTTP server mode (`render serve`).
 //!
 //! Exposes the render pipeline over HTTP as an asynchronous job API. Renders
 //! are long-running, GPU-bound, blocking work, so requests never wait for a

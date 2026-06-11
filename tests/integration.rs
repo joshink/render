@@ -3,13 +3,13 @@ use std::process::Command;
 use image::{GenericImageView, Pixel};
 use serde::Deserialize;
 
-use render_poc::config::RenderSpec;
+use render::config::RenderSpec;
 
 
 
 fn run_test_case(spec_name: &str) {
     let spec_path = format!("tests/fixtures/{}", spec_name);
-    let binary_path = env!("CARGO_BIN_EXE_render-poc");
+    let binary_path = env!("CARGO_BIN_EXE_render");
     
     // Determine the base folder name (e.g., "01_identity" from "01_identity.json")
     let spec_base = spec_name.strip_suffix(".json").unwrap_or(spec_name);
@@ -67,7 +67,7 @@ fn run_test_case(spec_name: &str) {
     // Load input image and resize to match spec composition
     let in_resized = if let Some(mut input_path) = spec.get_input_path() {
         if input_path.starts_with("http://") || input_path.starts_with("https://") {
-            input_path = render_poc::download::fetch_remote_url(&input_path).expect("Failed to fetch remote test asset");
+            input_path = render::download::fetch_remote_url(&input_path).expect("Failed to fetch remote test asset");
         }
         let in_img = image::open(&input_path).expect("Failed to open input image");
         in_img.resize_exact(spec.composition.width, spec.composition.height, image::imageops::FilterType::Nearest)
@@ -656,7 +656,7 @@ fn test_14_trim_start() {
 // Run explicitly with: cargo test test_15_remote_upload -- --ignored
 fn test_15_remote_upload() {
     let spec_path = "tests/fixtures/15_remote_upload.json";
-    let binary_path = env!("CARGO_BIN_EXE_render-poc");
+    let binary_path = env!("CARGO_BIN_EXE_render");
     let debug_base_dir = "tests/fixtures/outputs/debug/15_remote_upload";
 
     println!("Running binary: {} with spec: {} and debug dir: {}", binary_path, spec_path, debug_base_dir);

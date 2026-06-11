@@ -1,6 +1,6 @@
 # KDL Spec Front-End
 
-`render-poc` accepts two input formats interchangeably:
+`render` accepts two input formats interchangeably:
 
 - **`*.json`** — the canonical spec described in [SPEC.md](./SPEC.md).
 - **`*.kdl`** — a readable [KDL](https://kdl.dev) front-end that transpiles to
@@ -12,8 +12,8 @@ keyframes, expressions, the effect/transition catalogs) applies unchanged — KD
 only changes how you *write* the document.
 
 ```sh
-render-poc timeline.kdl                 # render a KDL spec
-render-poc timeline.kdl --emit-json     # print the transpiled spec and exit
+render timeline.kdl                 # render a KDL spec
+render timeline.kdl --emit-json     # print the transpiled spec and exit
 ```
 
 `--emit-json` is the source of truth: when in doubt about how something maps,
