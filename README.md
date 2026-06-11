@@ -41,8 +41,8 @@ git clone https://github.com/joshink/render.git
 cd render
 cargo build --release
 
-# Render the bundled proof-of-concept spec → output.png
-cargo run --release -- spec.json
+# Render a bundled example spec → tests/fixtures/outputs/01_identity.png
+cargo run --release -- tests/fixtures/01_identity.json
 ```
 
 **Install**
@@ -395,16 +395,6 @@ shaders, fonts) at runtime, in this order:
 
 Full details, including per-asset path resolution, are in
 [SPEC.md §2.5](./SPEC.md#25-library--asset-resolution).
-
----
-
-## Building for AI Agents
-
-This project was vibe-coded with Gemini and Claude. To keep that workflow going,
-[Agents.md](./Agents.md) is an onboarding guide for AI coding agents: it covers
-hardware memory boundaries (e.g. `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT` unpadding),
-WGSL `std140` alignment, and the tech-stack roadmap. **If you are an AI
-assistant working here, read it before writing code.**
 
 ---
 

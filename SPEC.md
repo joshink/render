@@ -543,8 +543,7 @@ not name-matched**, so authors **MUST** observe this contract:
 
 Every custom shader also receives a standard `EngineParams` uniform at
 `@binding(2)`: `{ time, clip_time, progress, width, height }` (transitions add a
-second input texture and use `TransitionEngineParams`). See `Agents.md` for the
-binding layouts and std140 alignment rules.
+second input texture and use `TransitionEngineParams`).
 
 ---
 

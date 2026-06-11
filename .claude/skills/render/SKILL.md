@@ -1,6 +1,6 @@
 ---
 name: render
-description: Use the Render engine — a headless GPU video compositor that turns one JSON/KDL spec into a PNG or MP4. Use when authoring render specs, producing videos/stills with render, or debugging render output. For modifying the engine itself, also read Agents.md.
+description: Use the Render engine — a headless GPU video compositor that turns one JSON/KDL spec into a PNG or MP4. Use when authoring render specs, producing videos/stills with render, or debugging render output. For modifying the engine itself, see the "Touching engine code?" section.
 ---
 
 # Render (headless GPU video compositor)
@@ -77,4 +77,4 @@ curl -s -X POST localhost:8080/render -H 'Content-Type: application/json' --data
 
 ## Touching engine code?
 
-Read `Agents.md` first — it covers the two constraints that break naively-written GPU code here: 256-byte row-pitch alignment when reading textures back to CPU (rows must be unpadded), and std140 16-byte uniform alignment (`#[repr(C)]` + explicit padding + bytemuck derives).
+Two constraints break naively-written GPU code here: 256-byte row-pitch alignment when reading textures back to CPU (rows must be unpadded), and std140 16-byte uniform alignment (`#[repr(C)]` + explicit padding + bytemuck derives).

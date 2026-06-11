@@ -10,7 +10,7 @@
   "assets": {
     "input_image": {
       "type": "image",
-      "path": "input.jpg"
+      "path": "tests/fixtures/input.jpg"
     }
   },
   "tracks": [
