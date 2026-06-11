@@ -19,6 +19,10 @@ rust-s3 = { version = "0.33", default-features = false, features = ["blocking", 
 ureq = "2.9"
 clap = { version = "4.4", features = ["derive"] }
 kdl = "=6.5.0"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "time"] }
+axum = "0.8"
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
 
 
 [dev-dependencies]

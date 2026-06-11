@@ -7,7 +7,6 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::RwLock;
 use evalexpr::{ContextWithMutableVariables, ContextWithMutableFunctions, HashMapContext};
 
 #[derive(Deserialize, Debug, Clone)]
@@ -47,26 +46,6 @@ pub struct SpotCheckMetadata {
     pub format: String,
 }
 
-// NOTE: EFFECTS_REGISTRY and TRANSITIONS_REGISTRY share structurally identical patterns for
-// registration and access. If a third registry type is introduced in the future, consider
-// extracting a generic Registry<T> type or using a macro to reduce boilerplate.
-
-static EFFECTS_REGISTRY: RwLock<Vec<EffectMetadata>> = RwLock::new(Vec::new());
-
-pub fn register_effect_metadata(meta: EffectMetadata) {
-    if let Ok(mut registry) = EFFECTS_REGISTRY.write() {
-        if let Some(existing) = registry.iter_mut().find(|m| m.effect_type == meta.effect_type) {
-            *existing = meta;
-        } else {
-            registry.push(meta);
-        }
-    }
-}
-
-pub fn get_effects_registry() -> Vec<EffectMetadata> {
-    EFFECTS_REGISTRY.read().map(|r| r.clone()).unwrap_or_default()
-}
-
 #[derive(Deserialize, Debug, Clone)]
 pub struct TransitionMetadata {
     #[serde(rename = "type")]
@@ -76,20 +55,42 @@ pub struct TransitionMetadata {
     pub spot_checks: Vec<SpotCheckMetadata>,
 }
 
-static TRANSITIONS_REGISTRY: RwLock<Vec<TransitionMetadata>> = RwLock::new(Vec::new());
-
-pub fn register_transition_metadata(meta: TransitionMetadata) {
-    if let Ok(mut registry) = TRANSITIONS_REGISTRY.write() {
-        if let Some(existing) = registry.iter_mut().find(|m| m.transition_type == meta.transition_type) {
-            *existing = meta;
-        } else {
-            registry.push(meta);
-        }
-    }
+/// Effect/transition metadata extracted from the WGSL shaders compiled for a
+/// single render. Owned by the render's pipeline state (not a process-wide
+/// static) so concurrent jobs — which may declare same-named custom shaders
+/// with different parameter layouts — can never observe each other's metadata.
+#[derive(Debug, Clone, Default)]
+pub struct ShaderRegistry {
+    pub effects: Vec<EffectMetadata>,
+    pub transitions: Vec<TransitionMetadata>,
 }
 
-pub fn get_transitions_registry() -> Vec<TransitionMetadata> {
-    TRANSITIONS_REGISTRY.read().map(|r| r.clone()).unwrap_or_default()
+impl ShaderRegistry {
+    /// Registers effect metadata, replacing any existing entry of the same type.
+    pub fn register_effect(&mut self, meta: EffectMetadata) {
+        if let Some(existing) = self.effects.iter_mut().find(|m| m.effect_type == meta.effect_type) {
+            *existing = meta;
+        } else {
+            self.effects.push(meta);
+        }
+    }
+
+    /// Registers transition metadata, replacing any existing entry of the same type.
+    pub fn register_transition(&mut self, meta: TransitionMetadata) {
+        if let Some(existing) = self.transitions.iter_mut().find(|m| m.transition_type == meta.transition_type) {
+            *existing = meta;
+        } else {
+            self.transitions.push(meta);
+        }
+    }
+
+    pub fn find_effect(&self, effect_type: &str) -> Option<&EffectMetadata> {
+        self.effects.iter().find(|m| m.effect_type == effect_type)
+    }
+
+    pub fn find_transition(&self, transition_type: &str) -> Option<&TransitionMetadata> {
+        self.transitions.iter().find(|m| m.transition_type == transition_type)
+    }
 }
 
 fn extract_tagged_block(wgsl: &str, tag: &str) -> Option<String> {
@@ -120,6 +121,11 @@ pub enum OutputConfig {
     },
 }
 
+/// Remote output destination schemes accepted by the pipeline. The single
+/// source of truth shared by the upload dispatch, the serve-mode destination
+/// validation, and the CLI's mux handling.
+pub const REMOTE_SCHEMES: [&str; 5] = ["s3://", "gs://", "mux://", "http://", "https://"];
+
 impl OutputConfig {
     pub fn path(&self) -> &str {
         match self {
@@ -141,6 +147,24 @@ impl OutputConfig {
     pub fn clean_path(&self) -> &str {
         let p = self.path();
         p.split('?').next().unwrap_or(p)
+    }
+
+    /// True when the output lands somewhere remote (upload required) rather
+    /// than on the local filesystem.
+    pub fn is_remote(&self) -> bool {
+        let p = self.path();
+        REMOTE_SCHEMES.iter().any(|scheme| p.starts_with(scheme))
+    }
+
+    pub fn is_mux(&self) -> bool {
+        self.path().starts_with("mux://")
+    }
+
+    /// True when the render produces a video. Mux only ingests video, so a
+    /// `mux://` destination always implies an `.mp4` render regardless of the
+    /// (path-less) scheme.
+    pub fn is_movie(&self) -> bool {
+        self.is_mux() || self.clean_path().ends_with(".mp4")
     }
 }
 
@@ -420,92 +444,6 @@ pub struct Transition {
     pub params: Option<HashMap<String, serde_json::Value>>,
 }
 
-/// GPU-side uniform block for the built-in effect shader pipeline.
-///
-/// **Alignment contract**: this struct is `#[repr(C)]` and its total size
-/// must be a multiple of 16 bytes (std140 / WGSL uniform layout). The
-/// trailing `_padding` field ensures this invariant.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ShaderParams {
-    // Basic settings
-    pub grayscale_enabled: u32,
-    pub brightness_factor: f32,
-    pub contrast_factor: f32,
-    pub saturation_factor: f32,
-
-    pub hue_rotate_angle: f32,
-    pub blur_radius: f32,
-    pub glow_intensity: f32,
-    pub glow_radius: f32,
-
-    pub glow_threshold: f32,
-    pub film_grain_amount: f32,
-    pub film_grain_speed: f32,
-    pub film_flicker_amount: f32,
-
-    pub film_flicker_speed: f32,
-    pub depth_blur_focus_x: f32,
-    pub depth_blur_focus_y: f32,
-    pub depth_blur_focus_radius: f32,
-
-    pub depth_blur_near_blur: f32,
-    pub depth_blur_far_blur: f32,
-    pub depth_blur_use_map: u32,
-    pub flow_amount: f32,
-
-    pub flow_speed: f32,
-    pub flow_decay: f32,
-    pub time: f32,
-    pub clip_time: f32,
-
-    pub width: u32,
-    pub height: u32,
-    pub _padding: [u32; 2],
-}
-
-impl ShaderParams {
-    pub fn set_field(&mut self, target: &str, val_str_opt: Option<&str>, val_f32: f32) {
-        match target {
-            "grayscale_enabled" => self.grayscale_enabled = if val_f32 > 0.5 { 1 } else { 0 },
-            "brightness_factor" => self.brightness_factor = val_f32,
-            "contrast_factor" => self.contrast_factor = val_f32,
-            "saturation_factor" => self.saturation_factor = val_f32,
-            "hue_rotate_angle" => self.hue_rotate_angle = val_f32,
-            "blur_radius" => self.blur_radius = val_f32,
-            "glow_intensity" => self.glow_intensity = val_f32,
-            "glow_radius" => self.glow_radius = val_f32,
-            "glow_threshold" => self.glow_threshold = val_f32,
-            "film_grain_amount" => self.film_grain_amount = val_f32,
-            "film_grain_speed" => self.film_grain_speed = val_f32,
-            "film_flicker_amount" => self.film_flicker_amount = val_f32,
-            "film_flicker_speed" => self.film_flicker_speed = val_f32,
-            "depth_blur_focus_x" => self.depth_blur_focus_x = val_f32,
-            "depth_blur_focus_y" => self.depth_blur_focus_y = val_f32,
-            "depth_blur_focus_radius" => self.depth_blur_focus_radius = val_f32,
-            "depth_blur_near_blur" => self.depth_blur_near_blur = val_f32,
-            "depth_blur_far_blur" => self.depth_blur_far_blur = val_f32,
-            "depth_blur_use_map" => {
-                if let Some(s) = val_str_opt {
-                    if !s.is_empty() {
-                        self.depth_blur_use_map = 1;
-                    }
-                } else if val_f32 > 0.5 {
-                    self.depth_blur_use_map = 1;
-                }
-            }
-            "flow_amount" => self.flow_amount = val_f32,
-            "flow_speed" => self.flow_speed = val_f32,
-            "flow_decay" => self.flow_decay = val_f32,
-            _ => {
-                log::warn!("Unknown ShaderParams target field: {}", target);
-            }
-        }
-    }
-}
-
-
-
 /// GPU-side uniform block for the compositor shader.
 ///
 /// **Alignment contract**: `#[repr(C)]` with `_padding` to maintain a
@@ -777,15 +715,12 @@ impl RenderSpec {
         list
     }
 
-    pub fn get_spot_check_events(&self) -> Vec<(f32, String)> {
+    pub fn get_spot_check_events(&self, registry: &ShaderRegistry) -> Vec<(f32, String)> {
         let mut events = Vec::new();
-        let is_movie = self.output.clean_path().ends_with(".mp4");
+        let is_movie = self.output.is_movie();
 
         events.push((0.0, "Composition start".to_string()));
         events.push((self.composition.duration, "Composition end".to_string()));
-
-        let registry = get_effects_registry();
-        let trans_registry = get_transitions_registry();
 
         for track in &self.tracks {
             let start_times = track.get_clip_start_times();
@@ -807,7 +742,7 @@ impl RenderSpec {
 
                 if is_movie {
                     for effect in &clip.effects {
-                        if let Some(meta) = registry.iter().find(|m| m.effect_type == effect.effect_type) {
+                        if let Some(meta) = registry.find_effect(&effect.effect_type) {
                             for check in &meta.spot_checks {
                                 let mut t = check.time_start;
                                 while t < clip.duration {
@@ -837,7 +772,7 @@ impl RenderSpec {
             for (tr, start_time) in track.resolve_transitions() {
                 if is_movie {
                     let tr_shader = tr.shader.as_deref().unwrap_or(&tr.transition_type);
-                    if let Some(meta) = trans_registry.iter().find(|m| &m.transition_type == tr_shader) {
+                    if let Some(meta) = registry.find_transition(tr_shader) {
                         for check in &meta.spot_checks {
                             let mut t = check.time_start;
                             while t < tr.duration {
@@ -909,18 +844,6 @@ impl Clip {
             .unwrap_or(1.0)
     }
 
-    pub fn eval_built_in_effects(&self, clip_time: f32, w: u32, h: u32) -> (u32, f32) {
-        eval_built_in_effects_from_effects(&self.effects, clip_time, self.duration, w, h)
-    }
-
-    pub fn get_depth_map_asset_id(&self) -> Option<String> {
-        get_depth_map_asset_id_from_effects(&self.effects)
-    }
-
-    pub fn eval_shader_params(&self, clip_time: f32, comp_width: u32, comp_height: u32, time: f32) -> ShaderParams {
-        eval_shader_params_from_effects(&self.effects, clip_time, self.duration, comp_width, comp_height, time)
-    }
-
     pub fn eval_compositor_params(&self, clip_time: f32, spec: &RenderSpec) -> CompositorParams {
         let position = self.eval_position(clip_time, spec.composition.width, spec.composition.height);
         let scale = self.eval_scale(clip_time, spec.composition.width, spec.composition.height);
@@ -963,10 +886,9 @@ pub fn eval_built_in_effects_from_effects(effects: &[Effect], clip_time: f32, du
 
 /// Resolves the LUT asset id referenced by an effect whose metadata declares a
 /// `lut`-typed parameter. Mirrors [`get_depth_map_asset_id_from_effects`].
-pub fn get_lut_asset_id_from_effects(effects: &[Effect]) -> Option<String> {
-    let registry = get_effects_registry();
+pub fn get_lut_asset_id_from_effects(registry: &ShaderRegistry, effects: &[Effect]) -> Option<String> {
     for effect in effects {
-        if let Some(meta) = registry.iter().find(|m| m.effect_type == effect.effect_type) {
+        if let Some(meta) = registry.find_effect(&effect.effect_type) {
             for param in &meta.params {
                 if param.param_type == "lut" {
                     if let Some(ref params) = effect.params {
@@ -983,10 +905,9 @@ pub fn get_lut_asset_id_from_effects(effects: &[Effect]) -> Option<String> {
     None
 }
 
-pub fn get_depth_map_asset_id_from_effects(effects: &[Effect]) -> Option<String> {
-    let registry = get_effects_registry();
+pub fn get_depth_map_asset_id_from_effects(registry: &ShaderRegistry, effects: &[Effect]) -> Option<String> {
     for effect in effects {
-        if let Some(meta) = registry.iter().find(|m| m.effect_type == effect.effect_type) {
+        if let Some(meta) = registry.find_effect(&effect.effect_type) {
             for param in &meta.params {
                 if param.param_type == "depth_map" {
                     if let Some(ref params) = effect.params {
@@ -1001,68 +922,6 @@ pub fn get_depth_map_asset_id_from_effects(effects: &[Effect]) -> Option<String>
         }
     }
     None
-}
-
-pub fn eval_shader_params_from_effects(
-    effects: &[Effect],
-    clip_time: f32,
-    duration: f32,
-    comp_width: u32,
-    comp_height: u32,
-    time: f32,
-) -> ShaderParams {
-    let mut params = ShaderParams {
-        grayscale_enabled: 0,
-        brightness_factor: 1.0,
-        contrast_factor: 1.0,
-        saturation_factor: 1.0,
-        hue_rotate_angle: 0.0,
-        blur_radius: 0.0,
-        glow_intensity: 0.0,
-        glow_radius: 0.0,
-        glow_threshold: 0.5,
-        film_grain_amount: 0.0,
-        film_grain_speed: 1.0,
-        film_flicker_amount: 0.0,
-        film_flicker_speed: 1.0,
-        depth_blur_focus_x: 0.5,
-        depth_blur_focus_y: 0.5,
-        depth_blur_focus_radius: 0.2,
-        depth_blur_near_blur: 0.0,
-        depth_blur_far_blur: 0.0,
-        depth_blur_use_map: 0,
-        flow_amount: 0.0,
-        flow_speed: 1.0,
-        flow_decay: 0.95,
-        time,
-        clip_time,
-        width: comp_width,
-        height: comp_height,
-        _padding: [0, 0],
-    };
-
-    let registry = get_effects_registry();
-    for effect in effects {
-        if let Some(meta) = registry.iter().find(|m| m.effect_type == effect.effect_type) {
-            for param in &meta.params {
-                if param.param_type == "depth_map" {
-                    let mut depth_map_str = None;
-                    if let Some(ref map) = effect.params {
-                        if let Some(val) = map.get(&param.name) {
-                            if let Some(s) = val.as_str() {
-                                depth_map_str = Some(s);
-                            }
-                        }
-                    }
-                    params.set_field(&param.target, depth_map_str, 0.0);
-                } else {
-                    let val = read_effect_float(effect, &param.name, clip_time, duration, comp_width, comp_height, param.default);
-                    params.set_field(&param.target, None, val);
-                }
-            }
-        }
-    }
-    params
 }
 
 /// Recursively scans any JSON value (whether in a Transform, Effect, or LayoutNode)

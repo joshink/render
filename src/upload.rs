@@ -99,14 +99,15 @@ fn base64_encode(input: &[u8]) -> String {
 ///      to [`upload_signed_url`], but Mux ingests and transcodes it into an asset.
 ///
 /// After the PUT, fetches the upload once more to read the `asset_id` Mux
-/// assigns on ingest and prints it to stdout. Asset *processing* (preparing →
-/// ready) is left to the caller to poll. Mux only ingests video, so non-`.mp4`
-/// outputs are rejected up front.
+/// assigns on ingest and returns it. If the asset id is not yet assigned,
+/// returns `upload:<upload_id>` as a pollable handle instead. Asset
+/// *processing* (preparing → ready) is left to the caller to poll. Mux only
+/// ingests video, so non-`.mp4` outputs are rejected up front.
 pub fn upload_mux(
     local_path: &str,
     token_id: Option<String>,
     token_secret: Option<String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     if !local_path.ends_with(".mp4") {
         return Err(format!(
             "Mux only ingests video; got '{}'. Use an .mp4 output (mux:// implies video).",
@@ -179,12 +180,12 @@ pub fn upload_mux(
 
     // 3. Mux creates the asset asynchronously after ingest, so the upload's
     // asset_id is not populated until shortly after the PUT. Re-fetch the
-    // upload a few times to read it, then print it. We deliberately do NOT wait
-    // for the asset to finish processing — the caller polls the asset itself.
+    // upload a few times to read it. We deliberately do NOT wait for the
+    // asset to finish processing — the caller polls the asset itself.
     match fetch_mux_asset_id(&auth, &upload_id) {
         Some(asset_id) => {
             log::info!("Mux asset created: {}", asset_id);
-            println!("{}", asset_id);
+            Ok(asset_id)
         }
         None => {
             log::warn!(
@@ -193,11 +194,9 @@ pub fn upload_mux(
                 upload_id, upload_id
             );
             // Fall back to the upload id so the caller has a handle to poll.
-            println!("upload:{}", upload_id);
+            Ok(format!("upload:{}", upload_id))
         }
     }
-
-    Ok(())
 }
 
 /// Polls `GET /video/v1/uploads/{id}` a bounded number of times to read the

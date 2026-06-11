@@ -4,8 +4,8 @@
 //! compute shaders (compositor, built-in effects, and custom user shaders),
 //! and reads the final pixel buffer back to the CPU for encoding.
 
-use crate::config::{RenderSpec, ClipType, Clip, Effect, Transition};
-use log::{error};
+use crate::config::{RenderSpec, ClipType, Clip, Effect, ShaderRegistry, Transition};
+use log::error;
 
 /// GPU-side uniform block for custom effect shaders.
 ///
@@ -144,14 +144,14 @@ fn align_uniform_buffer(buf: &mut Vec<u8>) {
 }
 
 pub fn pack_effect_params(
+    registry: &ShaderRegistry,
     effect: &Effect,
     clip_time: f32,
     duration: f32,
     width: u32,
     height: u32,
 ) -> Vec<u8> {
-    let registry = crate::config::get_effects_registry();
-    if let Some(meta) = registry.iter().find(|m| m.effect_type == effect.effect_type) {
+    if let Some(meta) = registry.find_effect(&effect.effect_type) {
         let mut sorted_params = meta.params.clone();
         sorted_params.sort_by(|a, b| a.target_name().cmp(b.target_name()));
 
@@ -199,6 +199,7 @@ pub fn pack_effect_params(
 }
 
 pub fn pack_transition_params(
+    registry: &ShaderRegistry,
     tr: &Transition,
     progress: f32,
     duration: f32,
@@ -206,8 +207,7 @@ pub fn pack_transition_params(
     height: u32,
 ) -> Vec<u8> {
     let shader_id = tr.shader.as_deref().unwrap_or(&tr.transition_type);
-    let registry = crate::config::get_transitions_registry();
-    if let Some(meta) = registry.iter().find(|m| &m.transition_type == shader_id) {
+    if let Some(meta) = registry.find_transition(shader_id) {
         let mut sorted_params = meta.params.clone();
         sorted_params.sort_by(|a, b| a.target_name().cmp(b.target_name()));
 
@@ -296,8 +296,13 @@ impl Timeline {
 }
 
 pub struct RenderContext {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+    /// Shared with the per-worker GPU cache (see `pipeline::acquire_gpu`),
+    /// so dropping a `RenderContext` does not tear the device down between
+    /// jobs in serve mode.
+    pub device: std::sync::Arc<wgpu::Device>,
+    pub queue: std::sync::Arc<wgpu::Queue>,
+    /// Effect/transition metadata for the shaders compiled for this render.
+    pub registry: ShaderRegistry,
     /// Pre-uploaded media/image textures, keyed by asset ID.
     pub gpu_textures: std::collections::HashMap<String, wgpu::Texture>,
     /// Pre-loaded font assets, keyed by asset ID.
@@ -378,7 +383,7 @@ impl RenderContext {
     /// Prefer [`render_frame_with_timeline`](Self::render_frame_with_timeline)
     /// in a frame loop and build the [`Timeline`] once; this wrapper exists for
     /// one-off callers (e.g. tests, single-image renders).
-    pub fn render_frame(&self, time: f32, spec: &RenderSpec) -> Vec<u8> {
+    pub fn render_frame(&self, time: f32, spec: &RenderSpec) -> Result<Vec<u8>, String> {
         let timeline = Timeline::build(spec);
         self.render_frame_with_timeline(time, spec, &timeline)
     }
@@ -390,7 +395,7 @@ impl RenderContext {
         time: f32,
         spec: &RenderSpec,
         timeline: &Timeline,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, String> {
         // Publish the absolute timeline time so the `time` expression variable
         // resolves to the global position (distinct from per-clip `clip_time`).
         crate::config::set_current_absolute_time(time);
@@ -814,15 +819,15 @@ impl RenderContext {
             };
             self.queue.write_buffer(&self.engine_params_buffer, 0, bytemuck::bytes_of(&engine_params));
 
-            let custom_params_data = pack_effect_params(effect, clip_time, duration, spec.composition.width, spec.composition.height);
+            let custom_params_data = pack_effect_params(&self.registry, effect, clip_time, duration, spec.composition.width, spec.composition.height);
             self.queue.write_buffer(&self.custom_params_buffer, 0, &custom_params_data);
 
-            let depth_texture_ref = crate::config::get_depth_map_asset_id_from_effects(&[effect.clone()])
+            let depth_texture_ref = crate::config::get_depth_map_asset_id_from_effects(&self.registry, std::slice::from_ref(effect))
                 .and_then(|asset_id| self.gpu_textures.get(&asset_id))
                 .unwrap_or(&self.transparent_texture);
             let depth_view = create_default_view(depth_texture_ref);
 
-            let lut_texture_ref = crate::config::get_lut_asset_id_from_effects(&[effect.clone()])
+            let lut_texture_ref = crate::config::get_lut_asset_id_from_effects(&self.registry, std::slice::from_ref(effect))
                 .and_then(|asset_id| self.gpu_textures.get(&asset_id))
                 .unwrap_or(&self.transparent_texture);
             let lut_view = create_default_view(lut_texture_ref);
@@ -941,7 +946,7 @@ impl RenderContext {
             };
             self.queue.write_buffer(&self.transition_engine_params_buffer, 0, bytemuck::bytes_of(&transition_params));
 
-            let custom_params_data = pack_transition_params(tr, progress, tr.duration, spec.composition.width, spec.composition.height);
+            let custom_params_data = pack_transition_params(&self.registry, tr, progress, tr.duration, spec.composition.width, spec.composition.height);
             self.queue.write_buffer(&self.transition_custom_params_buffer, 0, &custom_params_data);
 
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1033,7 +1038,7 @@ impl RenderContext {
     /// [`premultiply_alpha_on_black`] in `main.rs`) because ffmpeg drops the
     /// alpha channel when converting to an opaque pixel format, and
     /// premultiplied RGB is exactly the result of flattening onto black.
-    fn readback_pixels(&self, source_texture: &wgpu::Texture, spec: &RenderSpec) -> Vec<u8> {
+    fn readback_pixels(&self, source_texture: &wgpu::Texture, spec: &RenderSpec) -> Result<Vec<u8>, String> {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Readback Encoder"),
         });
@@ -1080,10 +1085,11 @@ impl RenderContext {
             }
             drop(data);
             self.readback_buffer.unmap();
-            unpadded_pixels
+            Ok(unpadded_pixels)
         } else {
-            error!("Failed to map readback buffer back to CPU!");
-            std::process::exit(1);
+            // Typically GPU device loss; the caller decides whether that fails
+            // one job or the whole process — never exit from library code.
+            Err("Failed to map readback buffer back to CPU (GPU device lost?)".to_string())
         }
     }
 }

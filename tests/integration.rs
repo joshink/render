@@ -3,7 +3,7 @@ use std::process::Command;
 use image::{GenericImageView, Pixel};
 use serde::Deserialize;
 
-use render_poc::config::{RenderSpec, ClipType};
+use render_poc::config::RenderSpec;
 
 
 

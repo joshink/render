@@ -22,6 +22,7 @@ runs on the GPU through WebGPU (`wgpu`) and WGSL compute shaders.
 ## Contents
 
 - [Quick Start](#quick-start)
+- [Server Mode](#server-mode)
 - [The Input File](#the-input-file)
 - [Features](#features)
 - [Architecture](#architecture)
@@ -55,6 +56,58 @@ cargo run --release -- spec.json
 ```bash
 cargo test --release   # progressive suite: filters → transitions → layout → audio → uploads
 ```
+
+---
+
+## Server Mode
+
+`render-poc serve` runs the engine as an HTTP service with an asynchronous job
+API. Renders are long-running and GPU-bound, so `POST /render` never blocks on
+the render itself: it validates the spec, enqueues a job, and immediately
+returns a job id. A fixed pool of worker threads (`--concurrency`) processes
+the queue.
+
+```bash
+render-poc serve --host 127.0.0.1 --port 8080 --concurrency 1 --queue-capacity 64
+```
+
+**Outputs must be remote destinations** (`s3://`, `gs://`, `mux://`, or a
+signed `http(s)://` PUT URL) — the server reports where the output landed
+rather than streaming rendered bytes back. Specs with local output paths are
+rejected with `422`. Credentials resolve exactly as in CLI mode: spec output
+credentials, then the global CLI flags (`--aws-key`, …), then environment
+variables.
+
+| Endpoint | Description |
+| --- | --- |
+| `POST /render` | Submit a spec (JSON, or KDL with a `kdl` Content-Type). Returns `202` with `{id, status_url, events_url}`, or `503` when the queue is full. |
+| `GET /render/{id}` | Current job status snapshot. |
+| `GET /render/{id}/events` | **SSE stream** of status updates; closes after the terminal event. |
+| `GET /healthz` | Liveness probe. |
+
+```bash
+# Submit a job
+curl -s -X POST localhost:8080/render -H 'Content-Type: application/json' --data @spec.json
+# → {"id":"…","status":"queued","status_url":"/render/…","events_url":"/render/…/events"}
+
+# Stream progress (SSE)
+curl -N localhost:8080/render/<id>/events
+# data: {"status":"running","progress":{"stage":"rendering","frame":12,"total_frames":150}}
+# data: {"status":"done","output":"s3://bucket/out.mp4"}
+```
+
+Job statuses: `queued` → `running` (with a `progress.stage` of
+`fetching_assets`, `loading_assets`, `initializing_gpu`, `compiling_shaders`,
+`rendering` (+ `frame`/`total_frames`), or `uploading`) → `done` (with
+`output`) or `failed` (with `error`). For `mux://` destinations `output` is
+the Mux asset id. Worker panics are caught and reported as failed jobs.
+
+Finished jobs stay queryable for **15 minutes** after completion, then their
+state is evicted from memory and `GET /render/{id}` returns `404`. An SSE
+stream that is already connected is never cut off by eviction.
+
+On `SIGTERM`/`Ctrl-C` the server stops accepting connections, finishes
+in-flight renders, and fails still-queued jobs before exiting.
 
 ---
 
@@ -283,10 +336,13 @@ clips support `trim_start` and per-clip offsets, muxed via FFmpeg at unity gain.
 ### ☁️ Remote assets & cloud upload
 
 Any asset `path` may be an `https://` URL — it's downloaded and cached
-automatically. The `output` may target the local disk, `s3://`, `gs://`, a
-signed `https://` PUT URL, or `mux://` (uploaded straight to [Mux Video](https://mux.com)
-via its Direct Uploads API), with credentials from the spec, CLI flags, or
-environment. → [Output](./SPEC.md#32-output), [Assets](./SPEC.md#34-assets)
+automatically (the cache is capped at 10 GiB, least-recently-used entries
+evicted first; override with `RENDER_CACHE_MAX_BYTES`). The `output` may
+target the local disk, `s3://`, `gs://`, a signed `https://` PUT URL, or
+`mux://` (uploaded straight to [Mux Video](https://mux.com) via its Direct
+Uploads API), with credentials from the spec, CLI flags, or environment.
+A failed FFmpeg encode fails the render — nothing is uploaded and the CLI
+exits non-zero. → [Output](./SPEC.md#32-output), [Assets](./SPEC.md#34-assets)
 
 ### ⚙️ CLI overrides
 
