@@ -30,9 +30,10 @@ impl Lut3d {
 
 /// Loads a LUT file (`.cube` or HALD image) and returns its strip atlas.
 ///
-/// Panics with a descriptive message on unreadable or malformed input — the
-/// engine treats asset-load failures as fatal, matching `load_asset_images`.
-pub fn load_lut_atlas(path: &Path) -> image::RgbaImage {
+/// Returns an error on unreadable or malformed input — asset-load failures
+/// are fatal to the render, and the caller decides whether that fails one
+/// job or the whole process.
+pub fn load_lut_atlas(path: &Path) -> Result<image::RgbaImage, String> {
     let is_cube = path
         .extension()
         .and_then(|e| e.to_str())
@@ -41,17 +42,16 @@ pub fn load_lut_atlas(path: &Path) -> image::RgbaImage {
 
     let lut = if is_cube {
         let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("Failed to read LUT file {:?}: {}", path, e));
-        parse_cube(&text)
-            .unwrap_or_else(|e| panic!("Failed to parse .cube LUT {:?}: {}", path, e))
+            .map_err(|e| format!("Failed to read LUT file {:?}: {}", path, e))?;
+        parse_cube(&text).map_err(|e| format!("Failed to parse .cube LUT {:?}: {}", path, e))?
     } else {
         let img = image::open(path)
-            .unwrap_or_else(|e| panic!("Failed to open HALD LUT {:?}: {}", path, e))
+            .map_err(|e| format!("Failed to open HALD LUT {:?}: {}", path, e))?
             .to_rgba8();
-        parse_hald(&img).unwrap_or_else(|e| panic!("Failed to parse HALD LUT {:?}: {}", path, e))
+        parse_hald(&img).map_err(|e| format!("Failed to parse HALD LUT {:?}: {}", path, e))?
     };
 
-    build_atlas(&lut)
+    Ok(build_atlas(&lut))
 }
 
 /// Parses an Adobe `.cube` file (1D or 3D). Domain is assumed to be `[0, 1]`.
@@ -60,7 +60,8 @@ fn parse_cube(text: &str) -> Result<Lut3d, String> {
     let mut size_1d: Option<usize> = None;
     let mut rows: Vec<[f32; 3]> = Vec::new();
 
-    for line in text.lines() {
+    for (line_idx, line) in text.lines().enumerate() {
+        let line_no = line_idx + 1;
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -69,27 +70,29 @@ fn parse_cube(text: &str) -> Result<Lut3d, String> {
         let head = tok.next().unwrap();
         match head {
             "LUT_3D_SIZE" => {
-                size_3d = Some(parse_usize(tok.next(), "LUT_3D_SIZE")?);
+                size_3d = Some(parse_usize(tok.next(), "LUT_3D_SIZE", line_no)?);
             }
             "LUT_1D_SIZE" => {
-                size_1d = Some(parse_usize(tok.next(), "LUT_1D_SIZE")?);
+                size_1d = Some(parse_usize(tok.next(), "LUT_1D_SIZE", line_no)?);
             }
             // Metadata / domain directives we intentionally ignore (domain is [0,1]).
             "TITLE" | "DOMAIN_MIN" | "DOMAIN_MAX" | "LUT_3D_INPUT_RANGE"
             | "LUT_1D_INPUT_RANGE" => {}
             _ => {
                 // A data row: three floats. Anything else is unexpected.
-                let r: f32 = head.parse().map_err(|_| format!("bad value '{}'", head))?;
+                let r: f32 = head
+                    .parse()
+                    .map_err(|_| format!("line {}: bad value '{}'", line_no, head))?;
                 let g: f32 = tok
                     .next()
-                    .ok_or("data row missing green")?
+                    .ok_or(format!("line {}: data row missing green", line_no))?
                     .parse()
-                    .map_err(|_| "bad green value".to_string())?;
+                    .map_err(|_| format!("line {}: bad green value", line_no))?;
                 let b: f32 = tok
                     .next()
-                    .ok_or("data row missing blue")?
+                    .ok_or(format!("line {}: data row missing blue", line_no))?
                     .parse()
-                    .map_err(|_| "bad blue value".to_string())?;
+                    .map_err(|_| format!("line {}: bad blue value", line_no))?;
                 rows.push([r, g, b]);
             }
         }
@@ -186,10 +189,10 @@ fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-fn parse_usize(tok: Option<&str>, name: &str) -> Result<usize, String> {
-    tok.ok_or_else(|| format!("{} missing value", name))?
+fn parse_usize(tok: Option<&str>, name: &str, line_no: usize) -> Result<usize, String> {
+    tok.ok_or_else(|| format!("line {}: {} missing value", line_no, name))?
         .parse()
-        .map_err(|_| format!("{} has invalid value", name))
+        .map_err(|_| format!("line {}: {} has invalid value", line_no, name))
 }
 
 #[cfg(test)]

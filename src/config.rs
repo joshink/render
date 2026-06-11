@@ -506,12 +506,18 @@ impl Track {
         let clip_starts = self.get_clip_start_times();
         let mut resolved = Vec::new();
         for tr in &self.transitions {
-            let start_time = tr.start.unwrap_or_else(|| {
-                self.clips.iter()
-                    .position(|c| c.id == tr.to)
-                    .map(|idx| clip_starts[idx] - tr.duration * 0.5)
-                    .unwrap_or(0.0)
-            });
+            let implicit_start = self.clips.iter()
+                .position(|c| c.id == tr.to)
+                .map(|idx| clip_starts[idx] - tr.duration * 0.5);
+            // Unreachable for specs that passed `validate_references`; guards
+            // against directly constructed Tracks.
+            let Some(start_time) = tr.start.or(implicit_start) else {
+                log::error!(
+                    "Transition '{}' in track '{}' references unknown clip '{}'; skipping it",
+                    tr.id, self.id, tr.to
+                );
+                continue;
+            };
             resolved.push((tr.clone(), start_time));
         }
         resolved
@@ -551,6 +557,276 @@ fn read_effect_float(effect: &Effect, key: &str, clip_time: f32, duration: f32, 
 // ---------------------------------------------------------------------------
 
 impl RenderSpec {
+    /// Validates every cross-reference in the spec — clip → asset, transition
+    /// → clip, effect/clip → preset, text → font asset — and reports all
+    /// broken references at once, so a bad spec fails fast with a complete
+    /// list instead of silently rendering wrong output (missing media becomes
+    /// transparent, missing presets/fonts/audio are dropped).
+    pub fn validate_references(&self) -> Result<(), String> {
+        let mut errors = Vec::new();
+
+        for track in &self.tracks {
+            let clip_ids: std::collections::HashSet<&str> =
+                track.clips.iter().map(|c| c.id.as_str()).collect();
+
+            for clip in &track.clips {
+                let context = format!("track '{}', clip '{}'", track.id, clip.id);
+                if let Some(asset_id) = &clip.asset {
+                    match self.assets.get(asset_id) {
+                        None => errors.push(format!(
+                            "{context}: references unknown asset '{asset_id}'"
+                        )),
+                        Some(asset) => {
+                            if clip.clip_type == ClipType::Media
+                                && !matches!(asset, Asset::Video { .. } | Asset::Image { .. })
+                            {
+                                errors.push(format!(
+                                    "{context}: media clip references asset '{asset_id}', which is not a video or image"
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let Some(preset) = &clip.preset {
+                    self.check_preset_ref(preset, &context, &mut errors, &mut Vec::new());
+                }
+                self.check_effect_presets(&clip.effects, &context, &mut errors, &mut Vec::new());
+                if let Some(text) = &clip.text_params {
+                    if let Some(font) = &text.font {
+                        self.check_font_ref(font, &context, &mut errors);
+                    }
+                    if let Some(body) = &text.body {
+                        self.check_layout_fonts(body, &context, &mut errors);
+                    }
+                }
+            }
+
+            for tr in &track.transitions {
+                for (field, target) in [("from", &tr.from), ("to", &tr.to)] {
+                    if !clip_ids.contains(target.as_str()) {
+                        let listed: Vec<&str> =
+                            track.clips.iter().map(|c| c.id.as_str()).collect();
+                        errors.push(format!(
+                            "track '{}': transition '{}' `{field}` references unknown clip '{target}' (clips in track: {})",
+                            track.id,
+                            tr.id,
+                            if listed.is_empty() { "<none>".to_string() } else { listed.join(", ") }
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(audio_tracks) = &self.audio_tracks {
+            for track in audio_tracks {
+                for clip in &track.clips {
+                    match self.assets.get(&clip.asset) {
+                        None => errors.push(format!(
+                            "audio track '{}', clip '{}': references unknown asset '{}'",
+                            track.id, clip.id, clip.asset
+                        )),
+                        Some(Asset::Audio { .. }) | Some(Asset::Video { .. }) => {}
+                        Some(_) => errors.push(format!(
+                            "audio track '{}', clip '{}': asset '{}' is not an audio or video asset",
+                            track.id, clip.id, clip.asset
+                        )),
+                    }
+                }
+            }
+        }
+
+        // Presets nest: validate references inside every definition too, so a
+        // broken inner reference is caught even before some clip uses it.
+        if let Some(presets) = &self.presets {
+            for def in presets {
+                self.check_effect_presets(
+                    &def.filters,
+                    &format!("preset '{}'", def.name),
+                    &mut errors,
+                    &mut vec![def.name.clone()],
+                );
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Spec validation failed with {} broken reference{}:\n  - {}",
+                errors.len(),
+                if errors.len() == 1 { "" } else { "s" },
+                errors.join("\n  - ")
+            ))
+        }
+    }
+
+    fn check_font_ref(&self, font_id: &str, context: &str, errors: &mut Vec<String>) {
+        // An empty/omitted font falls back to the built-in approximation.
+        if font_id.is_empty() {
+            return;
+        }
+        match self.assets.get(font_id) {
+            None => errors.push(format!(
+                "{context}: references unknown font asset '{font_id}'"
+            )),
+            Some(Asset::Font { .. }) => {}
+            Some(_) => errors.push(format!(
+                "{context}: asset '{font_id}' is used as a font but is not a font asset"
+            )),
+        }
+    }
+
+    fn check_layout_fonts(&self, node: &LayoutNode, context: &str, errors: &mut Vec<String>) {
+        if let Some(font) = &node.font {
+            self.check_font_ref(font, context, errors);
+        }
+        if let Some(children) = &node.children {
+            for child in children {
+                self.check_layout_fonts(child, context, errors);
+            }
+        }
+    }
+
+    fn check_effect_presets(
+        &self,
+        effects: &[Effect],
+        context: &str,
+        errors: &mut Vec<String>,
+        visiting: &mut Vec<String>,
+    ) {
+        for effect in effects {
+            if effect.effect_type == "preset" || effect.preset.is_some() {
+                let name = effect.preset.as_ref().unwrap_or(&effect.effect_type);
+                self.check_preset_ref(name, context, errors, visiting);
+            }
+        }
+    }
+
+    fn check_preset_ref(
+        &self,
+        name: &str,
+        context: &str,
+        errors: &mut Vec<String>,
+        visiting: &mut Vec<String>,
+    ) {
+        // Both cases below are hard errors because expand_effects truncates
+        // at depth > 5 at render time, silently dropping the chain's effects.
+        if visiting.iter().any(|n| n == name) {
+            errors.push(format!(
+                "{context}: preset cycle detected ({} → {name})",
+                visiting.join(" → ")
+            ));
+            return;
+        }
+        if visiting.len() > 5 {
+            errors.push(format!(
+                "{context}: preset nesting deeper than 5 levels ({} → {name})",
+                visiting.join(" → ")
+            ));
+            return;
+        }
+        let def = self
+            .presets
+            .as_ref()
+            .and_then(|list| list.iter().find(|p| p.name == name));
+        match def {
+            None => {
+                let known: Vec<&str> = self
+                    .presets
+                    .as_ref()
+                    .map(|l| l.iter().map(|p| p.name.as_str()).collect())
+                    .unwrap_or_default();
+                errors.push(format!(
+                    "{context}: references unknown preset '{name}'{}",
+                    if known.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (known presets: {})", known.join(", "))
+                    }
+                ));
+            }
+            Some(def) => {
+                visiting.push(name.to_string());
+                self.check_effect_presets(
+                    &def.filters,
+                    &format!("preset '{}'", def.name),
+                    errors,
+                    visiting,
+                );
+                visiting.pop();
+            }
+        }
+    }
+
+    /// Collects every shader pipeline id this spec can dispatch at render
+    /// time — effect shaders, Effect-clip shaders, and transition shaders,
+    /// with presets expanded statically — paired with a context string for
+    /// error messages. Used after pipeline compilation to verify the compiled
+    /// set covers the spec before the frame loop starts.
+    pub fn collect_required_shader_ids(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for track in &self.tracks {
+            for clip in &track.clips {
+                let context = format!("track '{}', clip '{}'", track.id, clip.id);
+                if clip.clip_type == ClipType::Effect {
+                    if let Some(shader) = &clip.shader {
+                        out.push((context.clone(), shader.clone()));
+                    } else if let Some(preset) = &clip.preset {
+                        self.collect_preset_shader_ids(preset, &context, &mut out, &mut Vec::new());
+                    }
+                }
+                self.collect_effect_shader_ids(&clip.effects, &context, &mut out, &mut Vec::new());
+            }
+            for tr in &track.transitions {
+                let id = tr.shader.clone().unwrap_or_else(|| tr.transition_type.clone());
+                out.push((format!("track '{}', transition '{}'", track.id, tr.id), id));
+            }
+        }
+        out
+    }
+
+    fn collect_effect_shader_ids(
+        &self,
+        effects: &[Effect],
+        context: &str,
+        out: &mut Vec<(String, String)>,
+        visiting: &mut Vec<String>,
+    ) {
+        for effect in effects {
+            if effect.effect_type == "preset" || effect.preset.is_some() {
+                let name = effect.preset.as_ref().unwrap_or(&effect.effect_type);
+                self.collect_preset_shader_ids(name, context, out, visiting);
+            } else {
+                let id = effect.shader.clone().unwrap_or_else(|| effect.effect_type.clone());
+                out.push((context.to_string(), id));
+            }
+        }
+    }
+
+    fn collect_preset_shader_ids(
+        &self,
+        name: &str,
+        context: &str,
+        out: &mut Vec<(String, String)>,
+        visiting: &mut Vec<String>,
+    ) {
+        // Unknown presets, cycles, and over-deep nesting are already reported
+        // by `validate_references`; just stop descending here.
+        if visiting.iter().any(|n| n == name) || visiting.len() > 5 {
+            return;
+        }
+        let Some(def) = self
+            .presets
+            .as_ref()
+            .and_then(|list| list.iter().find(|p| p.name == name))
+        else {
+            return;
+        };
+        visiting.push(name.to_string());
+        self.collect_effect_shader_ids(&def.filters, context, out, visiting);
+        visiting.pop();
+    }
+
     /// Recursively expands all presets in a list of effects into concrete (non-preset) effects.
     pub fn expand_effects(
         &self,
@@ -562,6 +838,9 @@ impl RenderSpec {
         depth: usize,
     ) -> Vec<Effect> {
         if depth > 5 {
+            // Unreachable for specs that passed `validate_references`, which
+            // rejects cycles and >5-level nesting; guards direct construction.
+            log::error!("Preset nesting exceeded depth 5; dropping the remaining effects");
             return Vec::new();
         }
         let mut expanded = Vec::new();
@@ -698,16 +977,18 @@ impl RenderSpec {
                 let start_times = track.get_clip_start_times();
                 for (idx, clip) in track.clips.iter().enumerate() {
                     let absolute_start = start_times[idx];
-                    if let Some(asset) = self.assets.get(&clip.asset) {
-                        match asset {
-                            Asset::Audio { path } => {
-                                list.push((path.clone(), absolute_start, clip.duration, clip.trim_start));
-                            }
-                            Asset::Video { path } => {
-                                list.push((path.clone(), absolute_start, clip.duration, clip.trim_start));
-                            }
-                            _ => {}
+                    match self.assets.get(&clip.asset) {
+                        Some(Asset::Audio { path }) | Some(Asset::Video { path }) => {
+                            list.push((path.clone(), absolute_start, clip.duration, clip.trim_start));
                         }
+                        Some(_) => log::warn!(
+                            "Audio clip '{}' references asset '{}', which is not audio or video; skipping it",
+                            clip.id, clip.asset
+                        ),
+                        None => log::warn!(
+                            "Audio clip '{}' references unknown asset '{}'; skipping it",
+                            clip.id, clip.asset
+                        ),
                     }
                 }
             }
@@ -1093,6 +1374,10 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, duration: f32, 
     if let Some(num) = value.as_f64() {
         return num as f32;
     }
+    // Literal bool (packed as 0/1 by bool-typed shader params)
+    if let Some(b) = value.as_bool() {
+        return if b { 1.0 } else { 0.0 };
+    }
     // Expression object: { "expression": "<expr>" }
     if let Some(obj) = value.as_object() {
         if let Some(expr_val) = obj.get("expression") {
@@ -1108,6 +1393,12 @@ pub fn evaluate_float(value: &serde_json::Value, clip_time: f32, duration: f32, 
             return v;
         }
     }
+    // Unrecognized shape (bare string, object without `expression`, malformed
+    // keyframes): warn once instead of silently becoming the default.
+    let key = value.to_string();
+    warn_expression_once(&key, || {
+        format!("Could not evaluate {} as a number; using default {}", key, default)
+    });
     default
 }
 
@@ -1278,6 +1569,36 @@ static BASE_CONTEXT: OnceLock<HashMapContext> = OnceLock::new();
 static EXPR_CACHE: OnceLock<Mutex<HashMap<String, evalexpr::Node>>> = OnceLock::new();
 
 thread_local! {
+    /// Expressions already warned about on this render thread, so per-frame
+    /// evaluation reports each broken expression once instead of flooding the
+    /// log. Thread-local (renders are single-threaded) and cleared by
+    /// [`reset_expression_warnings`] at the start of each render, so one
+    /// serve-mode job's warnings are never suppressed by an earlier job's.
+    static WARNED_EXPRS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Clears this thread's warned-expressions set. Called at the start of each
+/// render so every job reports its own broken expressions.
+pub fn reset_expression_warnings() {
+    WARNED_EXPRS.with(|w| w.borrow_mut().clear());
+}
+
+/// Logs at warn level the first time `expr` fails on this render; later
+/// failures of the same expression are silent (they would repeat every
+/// frame). The message is built lazily so the steady-state per-frame cost of
+/// an already-warned expression is a single set lookup.
+fn warn_expression_once(expr: &str, message: impl FnOnce() -> String) {
+    WARNED_EXPRS.with(|w| {
+        let mut warned = w.borrow_mut();
+        if !warned.contains(expr) {
+            warned.insert(expr.to_string());
+            log::warn!("{}", message());
+        }
+    });
+}
+
+thread_local! {
     /// The absolute timeline position (seconds) of the frame currently being
     /// rendered. SPEC §4.3 distinguishes `time` (absolute) from `clip_time`
     /// (relative to the clip start). Absolute time is constant across every
@@ -1435,7 +1756,10 @@ pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, wid
                 Some(node)
             }
             Err(e) => {
-                log::debug!("evalexpr::build_operator_tree failed for '{}': {:?}", cleaned_expr, e);
+                warn_expression_once(&cleaned_expr, || format!(
+                    "Expression '{}' failed to parse: {}. Falling back to plain-number parsing / the default value",
+                    expr, e
+                ));
                 None
             }
         }
@@ -1447,8 +1771,14 @@ pub fn evaluate_simple_expression(expr: &str, clip_time: f32, duration: f32, wid
         match node.eval_with_context(&context) {
             Ok(evalexpr::Value::Float(result)) => return result as f32,
             Ok(evalexpr::Value::Int(result)) => return result as f32,
-            Ok(other) => log::warn!("evalexpr Node returned non-numeric value: {:?}", other),
-            Err(e) => log::debug!("evalexpr Node eval failed for '{}': {:?}", cleaned_expr, e),
+            Ok(other) => warn_expression_once(&cleaned_expr, || format!(
+                "Expression '{}' returned non-numeric value {:?}; using the default value",
+                expr, other
+            )),
+            Err(e) => warn_expression_once(&cleaned_expr, || format!(
+                "Expression '{}' failed to evaluate: {}. Using the default value",
+                expr, e
+            )),
         }
     }
 
@@ -1526,5 +1856,181 @@ mod expr_keyframe_tests {
         assert_eq!(split_top_level_commas("a, b"), vec!["a", " b"]);
         assert_eq!(split_top_level_commas("clamp(x, 0, 1), y"), vec!["clamp(x, 0, 1)", " y"]);
         assert_eq!(split_top_level_commas("f(g(1,2), 3), h"), vec!["f(g(1,2), 3)", " h"]);
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    fn spec_from(json: serde_json::Value) -> RenderSpec {
+        serde_json::from_value(json).expect("test spec must deserialize")
+    }
+
+    fn base_spec(tracks: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "version": "1.0",
+            "output": "out.png",
+            "composition": { "width": 16, "height": 16, "fps": 30, "duration": 1.0 },
+            "assets": {
+                "img": { "type": "image", "path": "input.jpg" },
+                "song": { "type": "audio", "path": "song.mp3" },
+                "ttf": { "type": "font", "provider": "file", "path": "font.ttf" }
+            },
+            "tracks": tracks
+        })
+    }
+
+    #[test]
+    fn valid_spec_passes() {
+        let spec = spec_from(base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [
+                { "id": "a", "type": "media", "asset": "img", "duration": 1.0 },
+                { "id": "b", "type": "media", "asset": "img", "duration": 1.0 }
+            ],
+            "transitions": [
+                { "id": "t1", "type": "fade", "duration": 0.5, "from": "a", "to": "b" }
+            ]
+        }])));
+        assert!(spec.validate_references().is_ok());
+    }
+
+    #[test]
+    fn unknown_clip_asset_fails() {
+        let spec = spec_from(base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [{ "id": "a", "type": "media", "asset": "nope", "duration": 1.0 }]
+        }])));
+        let err = spec.validate_references().unwrap_err();
+        assert!(err.contains("clip 'a'") && err.contains("unknown asset 'nope'"), "{err}");
+    }
+
+    #[test]
+    fn transition_to_unknown_clip_fails() {
+        let spec = spec_from(base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [{ "id": "a", "type": "media", "asset": "img", "duration": 1.0 }],
+            "transitions": [
+                { "id": "t1", "type": "fade", "duration": 0.5, "from": "a", "to": "ghost" }
+            ]
+        }])));
+        let err = spec.validate_references().unwrap_err();
+        assert!(err.contains("transition 't1'") && err.contains("unknown clip 'ghost'"), "{err}");
+    }
+
+    #[test]
+    fn unknown_preset_fails() {
+        let spec = spec_from(base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [{
+                "id": "a", "type": "media", "asset": "img", "duration": 1.0,
+                "effects": [{ "type": "preset", "preset": "ghost-preset" }]
+            }]
+        }])));
+        let err = spec.validate_references().unwrap_err();
+        assert!(err.contains("unknown preset 'ghost-preset'"), "{err}");
+    }
+
+    #[test]
+    fn unknown_audio_asset_fails() {
+        let mut json = base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [{ "id": "a", "type": "media", "asset": "img", "duration": 1.0 }]
+        }]));
+        json["audio_tracks"] = serde_json::json!([{
+            "id": "music",
+            "clips": [{ "id": "m1", "asset": "ghost-song", "duration": 1.0 }]
+        }]);
+        let err = spec_from(json).validate_references().unwrap_err();
+        assert!(err.contains("audio track 'music'") && err.contains("unknown asset 'ghost-song'"), "{err}");
+    }
+
+    #[test]
+    fn audio_clip_on_non_audio_asset_fails() {
+        let mut json = base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [{ "id": "a", "type": "media", "asset": "img", "duration": 1.0 }]
+        }]));
+        json["audio_tracks"] = serde_json::json!([{
+            "id": "music",
+            "clips": [{ "id": "m1", "asset": "ttf", "duration": 1.0 }]
+        }]);
+        let err = spec_from(json).validate_references().unwrap_err();
+        assert!(err.contains("not an audio or video asset"), "{err}");
+    }
+
+    #[test]
+    fn unknown_font_fails() {
+        let spec = spec_from(base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [{
+                "id": "a", "type": "text", "duration": 1.0,
+                "text_params": { "text": "hi", "font": "ghost-font" }
+            }]
+        }])));
+        let err = spec.validate_references().unwrap_err();
+        assert!(err.contains("unknown font asset 'ghost-font'"), "{err}");
+    }
+
+    #[test]
+    fn multiple_errors_reported_together() {
+        let spec = spec_from(base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [
+                { "id": "a", "type": "media", "asset": "nope", "duration": 1.0 },
+                {
+                    "id": "b", "type": "media", "asset": "img", "duration": 1.0,
+                    "effects": [{ "type": "preset", "preset": "ghost" }]
+                }
+            ],
+            "transitions": [
+                { "id": "t1", "type": "fade", "duration": 0.5, "from": "a", "to": "ghost" }
+            ]
+        }])));
+        let err = spec.validate_references().unwrap_err();
+        assert!(err.contains("3 broken references"), "{err}");
+    }
+
+    #[test]
+    fn cyclic_presets_are_reported() {
+        let mut json = base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [{
+                "id": "a", "type": "media", "asset": "img", "duration": 1.0,
+                "effects": [{ "type": "preset", "preset": "p1" }]
+            }]
+        }]));
+        json["presets"] = serde_json::json!([
+            { "name": "p1", "inputs": [], "filters": [{ "type": "preset", "preset": "p2" }] },
+            { "name": "p2", "inputs": [], "filters": [{ "type": "preset", "preset": "p1" }] }
+        ]);
+        let err = spec_from(json).validate_references().unwrap_err();
+        assert!(err.contains("preset cycle detected"), "{err}");
+    }
+
+    #[test]
+    fn deep_preset_nesting_is_reported() {
+        // p0 → p1 → … → p6: deeper than expand_effects' depth-5 budget.
+        let mut json = base_spec(serde_json::json!([{
+            "id": "main",
+            "clips": [{
+                "id": "a", "type": "media", "asset": "img", "duration": 1.0,
+                "effects": [{ "type": "preset", "preset": "p0" }]
+            }]
+        }]));
+        let presets: Vec<serde_json::Value> = (0..7)
+            .map(|i| {
+                let filters = if i < 6 {
+                    serde_json::json!([{ "type": "preset", "preset": format!("p{}", i + 1) }])
+                } else {
+                    serde_json::json!([{ "type": "blur" }])
+                };
+                serde_json::json!({ "name": format!("p{i}"), "inputs": [], "filters": filters })
+            })
+            .collect();
+        json["presets"] = serde_json::Value::Array(presets);
+        let err = spec_from(json).validate_references().unwrap_err();
+        assert!(err.contains("preset nesting deeper than 5"), "{err}");
     }
 }

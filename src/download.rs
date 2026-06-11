@@ -87,7 +87,16 @@ pub fn fetch_remote_url(url: &str) -> Result<String, String> {
 /// `max_bytes`. Eviction races with concurrent readers are benign on POSIX:
 /// an unlinked file stays readable through any already-open handle.
 fn evict_cache_overflow(cache_dir: &Path, max_bytes: u64) {
-    let Ok(entries) = fs::read_dir(cache_dir) else { return };
+    let entries = match fs::read_dir(cache_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!(
+                "Failed to read asset cache dir {:?} for eviction ({}); cache may grow unbounded",
+                cache_dir, e
+            );
+            return;
+        }
+    };
     let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
         .flatten()
         .filter_map(|entry| {

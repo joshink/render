@@ -39,11 +39,14 @@ pub fn kdl_to_spec_json(src: &str) -> Result<Value, String> {
         if node.name().value() == "def" {
             let name = first_string_arg(node)
                 .ok_or_else(|| "`def` requires a name: `def \"my_block\" { … }`".to_string())?;
-            let inner = node
-                .children()
-                .and_then(|d| d.nodes().first())
-                .ok_or_else(|| format!("`def \"{name}\"` must contain exactly one node"))?;
-            defs.insert(name.to_string(), inner.clone());
+            let children = node.children().map(|d| d.nodes()).unwrap_or(&[]);
+            if children.len() != 1 {
+                return Err(format!(
+                    "`def \"{name}\"` must contain exactly one node, found {}",
+                    children.len()
+                ));
+            }
+            defs.insert(name.to_string(), children[0].clone());
         }
     }
 
@@ -205,7 +208,7 @@ fn build_track(node: &KdlNode, defs: &Defs) -> Result<Value, String> {
     let id = first_string_arg(node)
         .ok_or("`track` needs an id")?
         .to_string();
-    m.insert("id".into(), Value::String(id));
+    m.insert("id".into(), Value::String(id.clone()));
     if let Some(start) = property(node, "start") {
         m.insert("start".into(), value_to_json(start));
     }
@@ -216,9 +219,13 @@ fn build_track(node: &KdlNode, defs: &Defs) -> Result<Value, String> {
         let mut trans_idx = 0;
         for c in children.nodes() {
             if CLIP_TYPES.contains(&c.name().value()) {
-                clips.push(build_clip(c, defs)?);
+                clips.push(build_clip(c, defs).map_err(|e| format!("track `{id}`: {e}"))?);
             } else {
-                transitions.push(build_transition(c, trans_idx)?);
+                // Any non-clip node is treated as a shader-driven transition,
+                // so transition types stay open-ended.
+                transitions.push(
+                    build_transition(c, trans_idx).map_err(|e| format!("track `{id}`: {e}"))?,
+                );
                 trans_idx += 1;
             }
         }
@@ -238,7 +245,7 @@ fn build_transition(node: &KdlNode, idx: usize) -> Result<Value, String> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{ttype}_{idx}"));
     m.insert("id".into(), Value::String(id));
-    m.insert("type".into(), Value::String(ttype));
+    m.insert("type".into(), Value::String(ttype.clone()));
 
     let mut params = Map::new();
     for (k, v) in properties(node) {
@@ -271,11 +278,19 @@ fn build_transition(node: &KdlNode, idx: usize) -> Result<Value, String> {
     }
     for req in ["from", "to"] {
         if !m.contains_key(req) {
-            return Err(format!("transition `{}` is missing `{req}=`", m["type"]));
+            return Err(format!(
+                "transition `{ttype}` (id `{}`) is missing `{req}=`; \
+                 if `{ttype}` was meant to be a clip, valid clip types are {}",
+                m["id"].as_str().unwrap_or("?"),
+                CLIP_TYPES.join(", ")
+            ));
         }
     }
     if !m.contains_key("duration") {
-        return Err("transition is missing `dur=`".into());
+        return Err(format!(
+            "transition `{ttype}` (id `{}`) is missing `dur=`",
+            m["id"].as_str().unwrap_or("?")
+        ));
     }
     if !params.is_empty() {
         m.insert("params".into(), Value::Object(params));

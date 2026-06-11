@@ -63,11 +63,19 @@ pub fn upload_signed_url(local_path: &str, url: &str) -> Result<(), String> {
             Ok(())
         }
         Err(ureq::Error::Status(code, response)) => {
-            let body = response.into_string().unwrap_or_default();
+            let body = error_body(response);
             Err(format!("Upload failed with status code {}: {}", code, body))
         }
         Err(e) => Err(format!("HTTP transport error: {}", e)),
     }
+}
+
+/// Reads an error response's body for inclusion in an error message, noting
+/// the read failure instead of silently substituting an empty string.
+fn error_body(response: ureq::Response) -> String {
+    response
+        .into_string()
+        .unwrap_or_else(|e| format!("<failed to read response body: {}>", e))
 }
 
 /// Encodes bytes as standard (RFC 4648) base64. Used to build the HTTP Basic
@@ -143,7 +151,7 @@ pub fn upload_mux(
     {
         Ok(resp) => resp,
         Err(ureq::Error::Status(code, response)) => {
-            let body = response.into_string().unwrap_or_default();
+            let body = error_body(response);
             return Err(format!("Mux create-upload failed with status code {}: {}", code, body));
         }
         Err(e) => return Err(format!("HTTP transport error creating Mux upload: {}", e)),
@@ -159,7 +167,10 @@ pub fn upload_mux(
         .as_str()
         .ok_or_else(|| format!("Mux create-upload response missing data.url: {}", json))?
         .to_string();
-    let upload_id = json["data"]["id"].as_str().unwrap_or("unknown").to_string();
+    let upload_id = json["data"]["id"]
+        .as_str()
+        .ok_or_else(|| format!("Mux create-upload response missing data.id: {}", json))?
+        .to_string();
 
     // 2. Stream the rendered file to the signed PUT URL. ureq sends the File
     // handle directly so large videos never sit fully in memory.
@@ -172,7 +183,7 @@ pub fn upload_mux(
             log::info!("Mux upload successful. Status code: {}", response.status());
         }
         Err(ureq::Error::Status(code, response)) => {
-            let body = response.into_string().unwrap_or_default();
+            let body = error_body(response);
             return Err(format!("Mux upload PUT failed with status code {}: {}", code, body));
         }
         Err(e) => return Err(format!("HTTP transport error uploading to Mux: {}", e)),
@@ -218,11 +229,25 @@ fn fetch_mux_asset_id(auth: &str, upload_id: &str) -> Option<String> {
         };
         let body = match resp.into_string() {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(e) => {
+                log::warn!(
+                    "Mux upload status body unreadable (attempt {}): {}",
+                    attempt + 1,
+                    e
+                );
+                continue;
+            }
         };
         let json: serde_json::Value = match serde_json::from_str(&body) {
             Ok(j) => j,
-            Err(_) => continue,
+            Err(e) => {
+                log::warn!(
+                    "Mux upload status response is not valid JSON (attempt {}): {}",
+                    attempt + 1,
+                    e
+                );
+                continue;
+            }
         };
         if let Some(asset_id) = json["data"]["asset_id"].as_str() {
             return Some(asset_id.to_string());

@@ -180,10 +180,15 @@ pub fn apply_override(json: &mut serde_json::Value, path: &str, value_str: &str)
     Ok(())
 }
 
-/// Sorts keyframes and deserializes the raw spec JSON into a [`RenderSpec`].
+/// Sorts keyframes, deserializes the raw spec JSON into a [`RenderSpec`], and
+/// validates every cross-reference so broken specs fail here with a full list
+/// of problems instead of rendering silently wrong output.
 pub fn finalize_spec(mut spec_value: serde_json::Value) -> Result<RenderSpec, String> {
     sort_value_keyframes(&mut spec_value);
-    serde_json::from_value(spec_value).map_err(|e| format!("Invalid render spec: {}", e))
+    let spec: RenderSpec =
+        serde_json::from_value(spec_value).map_err(|e| format!("Invalid render spec: {}", e))?;
+    spec.validate_references()?;
+    Ok(spec)
 }
 
 // ─── Path resolution ──────────────────────────────────────────────────────────
@@ -299,7 +304,8 @@ fn load_asset_images(spec: &RenderSpec) -> Result<HashMap<String, image::RgbaIma
             }
             Asset::Lut { path } => {
                 let resolved = resolve_asset_path(path);
-                let atlas = crate::lut::load_lut_atlas(&resolved);
+                let atlas = crate::lut::load_lut_atlas(&resolved)
+                    .map_err(|e| format!("Failed to load LUT asset '{}': {}", asset_id, e))?;
                 info!(
                     "Loaded LUT asset '{}' from {:?} (atlas {}x{})",
                     asset_id, resolved, atlas.width(), atlas.height()
@@ -312,20 +318,31 @@ fn load_asset_images(spec: &RenderSpec) -> Result<HashMap<String, image::RgbaIma
     Ok(cpu_images)
 }
 
-fn load_font_assets(spec: &RenderSpec) -> HashMap<String, Vec<u8>> {
+fn load_font_assets(spec: &RenderSpec) -> Result<HashMap<String, Vec<u8>>, String> {
     let mut font_assets = HashMap::new();
     for (asset_id, asset) in &spec.assets {
         if let Asset::Font { path, .. } = asset {
             let resolved_path = resolve_asset_path(path);
-            let bytes = std::fs::read(&resolved_path).unwrap_or_else(|e| {
-                error!("Failed to read font file '{:?}': {:?}", resolved_path, e);
-                Vec::new()
-            });
+            // A declared font that can't load is fatal, matching the policy
+            // for every other asset kind: continuing would silently render
+            // blank or mis-measured text.
+            let bytes = std::fs::read(&resolved_path).map_err(|e| {
+                format!(
+                    "Failed to read font asset '{}' from {:?}: {}",
+                    asset_id, resolved_path, e
+                )
+            })?;
+            if swash::FontRef::from_index(&bytes, 0).is_none() {
+                return Err(format!(
+                    "Font asset '{}' ({:?}) is not a parseable font file",
+                    asset_id, resolved_path
+                ));
+            }
             info!("Loaded font asset '{}' from {:?}", asset_id, resolved_path);
             font_assets.insert(asset_id.clone(), bytes);
         }
     }
-    font_assets
+    Ok(font_assets)
 }
 
 // ─── GPU initialisation ──────────────────────────────────────────────────────
@@ -882,6 +899,11 @@ fn build_ffmpeg_args(
     output_path: &str,
 ) -> Vec<String> {
     let mut ffmpeg_args = vec![
+        // Errors/warnings only: progress is reported via `Progress` events,
+        // and stderr is buffered for failure reporting — default-loglevel
+        // stats lines would grow that buffer without bound on long encodes.
+        "-loglevel".to_string(),
+        "error".to_string(),
         "-y".to_string(),
         "-f".to_string(),
         "rawvideo".to_string(),
@@ -1061,6 +1083,10 @@ impl ChildGuard {
         self.child.as_mut().and_then(|c| c.stdin.take())
     }
 
+    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.as_mut().and_then(|c| c.stderr.take())
+    }
+
     /// Waits for the child to exit normally, disarming the guard.
     fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
         self.child
@@ -1131,6 +1157,7 @@ fn run_render_loop(
         let ffmpeg_child = Command::new("ffmpeg")
             .args(&ffmpeg_args)
             .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to spawn ffmpeg process: {}", e))?;
         let mut ffmpeg = ChildGuard::new(ffmpeg_child);
@@ -1138,6 +1165,17 @@ fn run_render_loop(
         let mut ffmpeg_stdin = ffmpeg
             .take_stdin()
             .ok_or_else(|| "Failed to open stdin for ffmpeg".to_string())?;
+        // Drain stderr on a thread so ffmpeg can't block on a full pipe; the
+        // captured output goes into the error message if encoding fails (in
+        // serve mode the job error is otherwise just an exit code).
+        let stderr_handle = ffmpeg.take_stderr().map(|mut err| {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = String::new();
+                let _ = err.read_to_string(&mut buf);
+                buf
+            })
+        });
         *save_dur += save_start_inst.elapsed();
 
         for frame in 0..num_frames {
@@ -1180,10 +1218,20 @@ fn run_render_loop(
         let status = ffmpeg
             .wait()
             .map_err(|e| format!("Failed to wait for ffmpeg: {}", e))?;
+        let stderr_output = stderr_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
         if !status.success() {
             // Deliberately stricter than the pre-service CLI, which logged the
             // failure but still uploaded the (likely corrupt) file and exited 0.
-            return Err(format!("ffmpeg process failed with exit code: {:?}", status.code()));
+            let lines: Vec<&str> = stderr_output.lines().collect();
+            let tail = &lines[lines.len().saturating_sub(15)..];
+            return Err(format!(
+                "ffmpeg failed with exit code {:?}; stderr (last {} lines):\n{}",
+                status.code(),
+                tail.len(),
+                tail.join("\n")
+            ));
         }
         *save_dur += finish_save_start.elapsed();
     } else {
@@ -1290,6 +1338,10 @@ pub fn render(
 ) -> Result<RenderOutcome, String> {
     let start_time = Instant::now();
 
+    // Renders are single-threaded; give this job a clean warned-expressions
+    // set so warnings from an earlier job on this worker don't suppress its own.
+    crate::config::reset_expression_warnings();
+
     progress(Progress::FetchingAssets);
     fetch_remote_assets(&mut spec)?;
     let spec = spec;
@@ -1301,7 +1353,7 @@ pub fn render(
     progress(Progress::LoadingAssets);
     let img_load_start = Instant::now();
     let cpu_images = load_asset_images(&spec)?;
-    let font_assets = load_font_assets(&spec);
+    let font_assets = load_font_assets(&spec)?;
     let img_load_dur = img_load_start.elapsed();
 
     // ── GPU initialisation ───────────────────────────────────────────────
@@ -1407,6 +1459,11 @@ pub fn render(
         workgroups_x: (spec.composition.width + 15) / 16,
         workgroups_y: (spec.composition.height + 15) / 16,
     };
+
+    // Spec-load validation can't know which shaders exist (the library is
+    // scanned at compile time); now that the pipeline set is complete, a
+    // missing shader should fail here, not at first dispatch mid-frame.
+    render_context.validate_shader_references(&spec)?;
 
     let loop_result = run_render_loop(
         render_context,

@@ -34,7 +34,7 @@ impl Alignment {
             "bottom_left" | "bottom-left" | "bottomleft" => Alignment::BottomLeft,
             "bottom_right" | "bottom-right" | "bottomright" => Alignment::BottomRight,
             other => {
-                log::warn!("Unknown alignment '{}', using default", other);
+                log::warn!("Unknown alignment '{}', using {:?}", other, default);
                 default
             }
         }
@@ -637,9 +637,19 @@ impl ResolvedNode {
                 }
 
                 let Some(font_bytes) = state.font_assets.get(font_id) else {
+                    if !font_id.is_empty() {
+                        log::warn!(
+                            "Font asset '{}' not loaded; text will not be drawn",
+                            font_id
+                        );
+                    }
                     return;
                 };
                 let Some(font) = swash::FontRef::from_index(font_bytes, 0) else {
+                    log::warn!(
+                        "Font asset '{}' failed to parse; text will not be drawn",
+                        font_id
+                    );
                     return;
                 };
 
@@ -1024,7 +1034,15 @@ fn measure_text(
     }
 
     let Some(font_bytes) = font_assets.get(font_id) else {
-        // Fallback: estimate with monospace approximation
+        // Fallback: estimate with monospace approximation. Expected when no
+        // font was specified (empty id); a broken named reference is caught
+        // by spec validation before rendering starts.
+        if !font_id.is_empty() {
+            log::warn!(
+                "Font asset '{}' not loaded; measuring text with monospace approximation",
+                font_id
+            );
+        }
         let char_w = font_size * 0.5;
         let line_h = font_size * 1.2;
         let (max_w, lines) = wrap_paragraphs_approx(text, char_w, max_width);
@@ -1033,6 +1051,10 @@ fn measure_text(
     };
 
     let Some(font) = swash::FontRef::from_index(font_bytes, 0) else {
+        log::warn!(
+            "Font asset '{}' failed to parse; text will not be measured",
+            font_id
+        );
         return (0.0, 0.0, Vec::new());
     };
 

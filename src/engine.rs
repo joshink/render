@@ -359,7 +359,7 @@ impl RenderContext {
         time: f32,
         input: &mut &'a wgpu::Texture,
         output: &mut &'a wgpu::Texture,
-    ) {
+    ) -> Result<(), String> {
         match clip.clip_type {
             ClipType::Media | ClipType::Solid => {
                 self.composite_media_clip(clip, clip_time, spec, input, output);
@@ -378,7 +378,7 @@ impl RenderContext {
             spec,
             input,
             output,
-        );
+        )
     }
     /// Renders a single frame, deriving the timeline from `spec` on the fly.
     ///
@@ -445,17 +445,17 @@ impl RenderContext {
                     let mut sub_input_a = &self.texture_c;
                     let mut sub_output_a = &self.texture_d;
                     self.copy_texture(current_input, sub_input_a);
-                    self.render_clip_to_texture(from_clip, clip_time_a, spec, time, &mut sub_input_a, &mut sub_output_a);
+                    self.render_clip_to_texture(from_clip, clip_time_a, spec, time, &mut sub_input_a, &mut sub_output_a)?;
                     self.copy_texture(sub_input_a, current_output);
-                    
+
                     let mut sub_input_b = &self.texture_c;
                     let mut sub_output_b = &self.texture_d;
                     self.copy_texture(current_input, sub_input_b);
-                    self.render_clip_to_texture(to_clip, clip_time_b, spec, time, &mut sub_input_b, &mut sub_output_b);
-                    
+                    self.render_clip_to_texture(to_clip, clip_time_b, spec, time, &mut sub_input_b, &mut sub_output_b)?;
+
                     let transition_dest = sub_output_b;
                     let progress = ((time - *start).max(0.0) / tr.duration).clamp(0.0, 1.0);
-                    
+
                     self.dispatch_transition(
                         tr,
                         progress,
@@ -463,10 +463,17 @@ impl RenderContext {
                         sub_input_b,
                         transition_dest,
                         spec,
-                    );
+                    )?;
                     
                     self.copy_texture(transition_dest, current_output);
                     std::mem::swap(&mut current_input, &mut current_output);
+                } else {
+                    // Unreachable for specs that passed `validate_references`;
+                    // guards against directly constructed timelines.
+                    error!(
+                        "Transition '{}' references missing clip '{}' or '{}' in track '{}'; skipping it",
+                        tr.id, tr.from, tr.to, track.id
+                    );
                 }
             } else if let Some((clip, clip_time)) = active_clip_info {
                 match clip.clip_type {
@@ -510,7 +517,7 @@ impl RenderContext {
                             spec,
                             &mut current_input,
                             &mut current_output,
-                        );
+                        )?;
                     }
                 }
             }
@@ -814,7 +821,7 @@ impl RenderContext {
         spec: &RenderSpec,
         current_input: &mut &'a wgpu::Texture,
         current_output: &mut &'a wgpu::Texture,
-    ) {
+    ) -> Result<(), String> {
         if let Some(pipeline) = self.custom_shader_pipelines.get(shader_id) {
             let engine_params = EngineParams {
                 time,
@@ -901,9 +908,51 @@ impl RenderContext {
             }
             self.queue.submit(Some(encoder.finish()));
             std::mem::swap(current_input, current_output);
+            Ok(())
         } else {
-            error!("Shader pipeline '{}' not found!", shader_id);
+            Err(format!(
+                "Effect '{}' requires shader pipeline '{}', which was not compiled (available: {})",
+                effect.effect_type,
+                shader_id,
+                self.known_pipeline_ids()
+            ))
         }
+    }
+
+    /// Verifies that every shader id the spec can dispatch (effects,
+    /// Effect-clip shaders, transitions, presets expanded) exists in the
+    /// compiled pipeline set, so a missing shader fails the render up front
+    /// instead of at first dispatch inside the frame loop.
+    pub fn validate_shader_references(&self, spec: &RenderSpec) -> Result<(), String> {
+        let mut missing: Vec<String> = spec
+            .collect_required_shader_ids()
+            .into_iter()
+            .filter(|(_, id)| !self.custom_shader_pipelines.contains_key(id))
+            .map(|(context, id)| format!("{context}: shader '{id}'"))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        Err(format!(
+            "Spec references {} shader pipeline(s) that were not compiled:\n  - {}\nAvailable pipelines: {}",
+            missing.len(),
+            missing.join("\n  - "),
+            self.known_pipeline_ids()
+        ))
+    }
+
+    /// Sorted, comma-separated list of compiled shader pipeline ids, for
+    /// missing-pipeline error messages.
+    fn known_pipeline_ids(&self) -> String {
+        let mut known: Vec<&str> = self
+            .custom_shader_pipelines
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        known.sort_unstable();
+        known.join(", ")
     }
 
     fn dispatch_expanded_effects<'a>(
@@ -915,7 +964,7 @@ impl RenderContext {
         spec: &RenderSpec,
         current_input: &mut &'a wgpu::Texture,
         current_output: &mut &'a wgpu::Texture,
-    ) {
+    ) -> Result<(), String> {
         let progress = (clip_time / duration).clamp(0.0, 1.0);
 
         for effect in effects {
@@ -930,8 +979,9 @@ impl RenderContext {
                 spec,
                 current_input,
                 current_output,
-            );
+            )?;
         }
+        Ok(())
     }
 
     fn dispatch_transition(
@@ -942,7 +992,7 @@ impl RenderContext {
         tex_to: &wgpu::Texture,
         output_tex: &wgpu::Texture,
         spec: &RenderSpec,
-    ) {
+    ) -> Result<(), String> {
         let shader_id = tr.shader.as_deref().unwrap_or(&tr.transition_type);
         if let Some(pipeline) = self.custom_shader_pipelines.get(shader_id) {
             let transition_params = TransitionEngineParams {
@@ -996,8 +1046,14 @@ impl RenderContext {
                 compute_pass.dispatch_workgroups(self.workgroups_x, self.workgroups_y, 1);
             }
             self.queue.submit(Some(encoder.finish()));
+            Ok(())
         } else {
-            error!("Transition shader pipeline '{}' not found!", shader_id);
+            Err(format!(
+                "Transition '{}' requires shader pipeline '{}', which was not compiled (available: {})",
+                tr.id,
+                shader_id,
+                self.known_pipeline_ids()
+            ))
         }
     }
 
@@ -1071,33 +1127,45 @@ impl RenderContext {
         let buffer_slice = self.readback_buffer.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
-            sender.send(v).unwrap();
+            // Receiver gone means the render already failed elsewhere; don't
+            // panic inside the driver callback on top of it.
+            let _ = sender.send(v);
         });
 
         self.device.poll(wgpu::Maintain::Wait);
 
-        if let Ok(Ok(())) = receiver.recv() {
-            let data = buffer_slice.get_mapped_range();
-            let total_pixels = (spec.composition.width * spec.composition.height * 4) as usize;
-            let mut unpadded_pixels = vec![0u8; total_pixels];
-            let mut dest_idx = 0;
-            for row in 0..spec.composition.height {
-                let start = (row * self.bytes_per_row) as usize;
-                let end = start + (spec.composition.width * 4) as usize;
-                let row_data = &data[start..end];
-
-                // Copy straight (un-premultiplied) alpha through unchanged.
-                unpadded_pixels[dest_idx..dest_idx + row_data.len()].copy_from_slice(row_data);
-                dest_idx += row_data.len();
+        // Typically GPU device loss; the caller decides whether that fails
+        // one job or the whole process — never exit from library code.
+        match receiver.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(format!(
+                    "Failed to map GPU readback buffer: {e} (usually device loss or a validation error)"
+                ))
             }
-            drop(data);
-            self.readback_buffer.unmap();
-            Ok(unpadded_pixels)
-        } else {
-            // Typically GPU device loss; the caller decides whether that fails
-            // one job or the whole process — never exit from library code.
-            Err("Failed to map readback buffer back to CPU (GPU device lost?)".to_string())
+            Err(_) => {
+                return Err(
+                    "GPU readback callback never fired (device lost while polling?)".to_string(),
+                )
+            }
         }
+
+        let data = buffer_slice.get_mapped_range();
+        let total_pixels = (spec.composition.width * spec.composition.height * 4) as usize;
+        let mut unpadded_pixels = vec![0u8; total_pixels];
+        let mut dest_idx = 0;
+        for row in 0..spec.composition.height {
+            let start = (row * self.bytes_per_row) as usize;
+            let end = start + (spec.composition.width * 4) as usize;
+            let row_data = &data[start..end];
+
+            // Copy straight (un-premultiplied) alpha through unchanged.
+            unpadded_pixels[dest_idx..dest_idx + row_data.len()].copy_from_slice(row_data);
+            dest_idx += row_data.len();
+        }
+        drop(data);
+        self.readback_buffer.unmap();
+        Ok(unpadded_pixels)
     }
 }
 
