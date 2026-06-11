@@ -2,11 +2,6 @@
 
 > **A headless, GPU-accelerated video composition & rendering engine in Rust.**
 
-[![Vibe Coded with Gemini & Claude](https://img.shields.io/badge/Vibe%20Coded-Gemini%20%26%20Claude-purple.svg?style=for-the-badge&logo=google-gemini)](https://github.com/google-gemini)
-[![Rust](https://img.shields.io/badge/Language-Rust-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
-[![WebGPU](https://img.shields.io/badge/Backend-WebGPU%20(wgpu)-blue.svg?style=for-the-badge&logo=webgpu)](https://github.com/gfx-rs/wgpu)
-[![Educational PoC](https://img.shields.io/badge/Status-Educational%20PoC-green.svg?style=for-the-badge)](#-disclaimer)
-
 Render reads one declarative JSON file describing a composition — tracks, clips,
 effects, text, transitions, audio — and compiles it into a PNG or an H.264/AAC
 MP4. The entire timeline (compositing, blending, effects, transitions, text)
@@ -25,7 +20,6 @@ runs on the GPU through WebGPU (`wgpu`) and WGSL compute shaders.
 - [Server Mode](#server-mode)
 - [The Input File](#the-input-file)
 - [Features](#features)
-- [Architecture](#architecture)
 - [Library Resolution](#library-resolution)
 - [Building for AI Agents](#building-for-ai-agents)
 - [Credits](#credits) · [License](#license) · [Disclaimer](#-disclaimer)
@@ -375,43 +369,6 @@ transitions, and effect events. → [Debug layout](./SPEC.md#62-debug-run-layout
 
 ```bash
 cargo run --release -- spec.json --debug ./debug
-```
-
----
-
-## Architecture
-
-From JSON parse to GPU dispatch to FFmpeg encode:
-
-```mermaid
-graph TD
-    InputSpec[spec.json] -->|Parse & Resolve| Spec[RenderSpec]
-    InputAssets[Assets / Fonts] -->|Load / Download| AssetManager[Asset Registry]
-
-    Spec -->|Evaluate timeline & DSL| Timelines[Timeline Scheduler]
-    AssetManager -->|Rasterize Fonts| FontAtlas[Text Atlas]
-    AssetManager -->|Decode Frames| FrameBuffers[RGBA Buffers]
-
-    FrameBuffers -->|Upload| GPUTextureA[Input Texture]
-    FontAtlas -->|Upload| GPUTextureB[Text Overlay Texture]
-    Timelines -->|Serialize Uniforms| ParamsBuf[std140 Uniform Buffers]
-
-    GPUTextureA -->|Dispatch Compute| Engine[wgpu Headless Engine]
-    GPUTextureB -->|Dispatch Compute| Engine
-    ParamsBuf -->|Read Bindings| Engine
-
-    Engine -->|Compile & Bind| WGSLCompositor[compositor.wgsl]
-    Engine -->|Bind custom shaders| WGSLPostProc[Effect & Transition Shaders]
-    WGSLCompositor --> WGSLPostProc
-    WGSLPostProc -->|Write| OutputTexture[Output Storage Texture]
-
-    OutputTexture -->|Buffer Copy| Readback[Mapped Readback Buffer]
-    Readback -->|Row Unpadding| CPUFrame[CPU Pixel Array]
-
-    CPUFrame -->|Single Frame| SavePNG[output.png]
-    CPUFrame -->|Pipe Stream| FFmpeg[FFmpeg Encoder]
-    FFmpeg -->|H.264/AAC| SaveMP4[output.mp4]
-    SaveMP4 -->|S3 / GCS / PUT| CloudStorage[Remote Target]
 ```
 
 ---
