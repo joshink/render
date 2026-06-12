@@ -65,6 +65,20 @@ output {
 }
 ```
 
+### Output with encode settings
+
+```kdl
+output "out.mp4" {
+    encode crf=28 preset="slow" max_bitrate="12M"
+}
+```
+
+All three properties are optional and tune the H.264 encode (defaults: CRF 23,
+preset `medium`, no bitrate cap); see SPEC.md §3.2 for the value ranges. Use
+them to cap file size when per-frame noise (e.g. `film_grain`) would otherwise
+balloon the output. A bare path argument and a `{ }` block combine, as shown;
+`credentials` can live in the same block.
+
 ## Clips
 
 Inside a `track`, the four clip node names are `media`, `solid`, `text`,

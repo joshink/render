@@ -14,7 +14,7 @@ use crate::config::*;
 use crate::download::fetch_remote_url;
 use crate::engine::{EngineParams, RenderContext, Timeline, TransitionEngineParams};
 use crate::upload::{upload_gcs, upload_mux, upload_s3, upload_signed_url};
-use log::{error, info};
+use log::{error, info, warn};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::File;
@@ -969,25 +969,97 @@ fn build_ffmpeg_args(
         ffmpeg_args.push("0:v".to_string());
         ffmpeg_args.push("-map".to_string());
         ffmpeg_args.push("[aout]".to_string());
-        ffmpeg_args.push("-c:v".to_string());
-        ffmpeg_args.push("libx264".to_string());
-        // yuv420p with even-dimension padding for the widest player support.
-        // Raw rgba input otherwise drives libx264 to yuv444p, which Safari,
-        // QuickTime, and most hardware decoders refuse to play.
-        ffmpeg_args.push("-pix_fmt".to_string());
-        ffmpeg_args.push("yuv420p".to_string());
+        push_video_codec_args(&mut ffmpeg_args, spec);
         ffmpeg_args.push("-c:a".to_string());
         ffmpeg_args.push("aac".to_string());
         ffmpeg_args.push("-shortest".to_string());
     } else {
-        ffmpeg_args.push("-c:v".to_string());
-        ffmpeg_args.push("libx264".to_string());
-        ffmpeg_args.push("-pix_fmt".to_string());
-        ffmpeg_args.push("yuv420p".to_string());
+        push_video_codec_args(&mut ffmpeg_args, spec);
     }
 
     ffmpeg_args.push(output_path.to_string());
     ffmpeg_args
+}
+
+/// Pushes the H.264 encoder arguments, applying the spec's optional `encode`
+/// settings (CRF / preset / peak-bitrate cap) on top of the fixed choices.
+fn push_video_codec_args(ffmpeg_args: &mut Vec<String>, spec: &RenderSpec) {
+    ffmpeg_args.push("-c:v".to_string());
+    ffmpeg_args.push("libx264".to_string());
+    // yuv420p with even-dimension padding for the widest player support.
+    // Raw rgba input otherwise drives libx264 to yuv444p, which Safari,
+    // QuickTime, and most hardware decoders refuse to play.
+    ffmpeg_args.push("-pix_fmt".to_string());
+    ffmpeg_args.push("yuv420p".to_string());
+
+    let Some(encode) = spec.output.encode() else { return };
+    if let Some(crf) = encode.crf {
+        ffmpeg_args.push("-crf".to_string());
+        ffmpeg_args.push(crf.to_string());
+    }
+    if let Some(preset) = &encode.preset {
+        ffmpeg_args.push("-preset".to_string());
+        ffmpeg_args.push(preset.clone());
+    }
+    if let Some(rate) = &encode.max_bitrate {
+        // Already validated; a parse failure here would mean the spec skipped
+        // validate_references, so silently dropping the cap is the safe move.
+        if let Some(bps) = crate::config::parse_bitrate(rate) {
+            ffmpeg_args.push("-maxrate".to_string());
+            ffmpeg_args.push(bps.to_string());
+            // x264 ignores -maxrate without a VBV buffer; 2× maxrate (a two-
+            // second window at the cap) enforces the ceiling without starving
+            // individual high-complexity frames.
+            ffmpeg_args.push("-bufsize".to_string());
+            ffmpeg_args.push((bps * 2).to_string());
+        }
+    }
+}
+
+/// Effective bitrate above this many bits per pixel per frame triggers the
+/// oversized-output warning. Typical H.264 content lands around 0.1 bpp
+/// (≈ 6 Mbps at 1080p30); 0.4 (≈ 25 Mbps at 1080p30) only trips when
+/// something is defeating inter-frame prediction.
+const HIGH_BITRATE_BPP: f64 = 0.4;
+
+/// Below this absolute bitrate the warning never fires: at tiny resolutions
+/// or durations, fixed container/codec overhead dominates the bpp ratio, and
+/// a small file is never a size problem regardless of its ratio.
+const HIGH_BITRATE_FLOOR_BPS: f64 = 4e6;
+
+/// Logs the encoded file's size and effective bitrate, and warns when the
+/// bitrate is far above what the resolution and frame rate normally need —
+/// the signature of per-frame stochastic effects (film grain, noise) making
+/// every frame incompressible. Without this, that failure mode surfaces only
+/// as a mysteriously huge file long after the spec was written.
+fn report_encode_stats(path: &str, spec: &RenderSpec) {
+    let Ok(meta) = std::fs::metadata(path) else { return };
+    let duration = spec.composition.duration as f64;
+    if duration <= 0.0 {
+        return;
+    }
+    let bits_per_sec = meta.len() as f64 * 8.0 / duration;
+    info!(
+        "Encoded {:.1} MB at {:.1} Mbps",
+        meta.len() as f64 / 1e6,
+        bits_per_sec / 1e6
+    );
+
+    let comp = &spec.composition;
+    let pixels_per_sec = (comp.width as u64 * comp.height as u64 * comp.fps as u64) as f64;
+    if bits_per_sec > HIGH_BITRATE_FLOOR_BPS && bits_per_sec / pixels_per_sec > HIGH_BITRATE_BPP {
+        warn!(
+            "Output bitrate ({:.1} Mbps) is unusually high for {}x{}@{}fps — \
+             per-frame noise (e.g. film_grain) defeats inter-frame compression. \
+             To cap the size, set `crf` (e.g. 28) or `max_bitrate` (e.g. \"12M\") \
+             in the spec's output `encode` block. Harmless for mux:// output \
+             (Mux re-encodes), apart from upload time.",
+            bits_per_sec / 1e6,
+            comp.width,
+            comp.height,
+            comp.fps
+        );
+    }
 }
 
 /// Flattens straight-alpha RGBA onto black, in place, by premultiplying each
@@ -1245,6 +1317,7 @@ fn run_render_loop(
             ));
         }
         *save_dur += finish_save_start.elapsed();
+        report_encode_stats(&render_output_path, spec);
     } else {
         info!("Rendering single image...");
         progress(Progress::Rendering { frame: 0, total_frames: 1 });
@@ -1543,6 +1616,42 @@ mod tests {
         let mut px = vec![200u8, 100, 50, 0];
         premultiply_alpha_on_black(&mut px);
         assert_eq!(px, vec![0, 0, 0, 0]);
+    }
+
+    fn minimal_spec(output: serde_json::Value) -> RenderSpec {
+        serde_json::from_value(serde_json::json!({
+            "version": "1.0",
+            "output": output,
+            "composition": { "width": 16, "height": 16, "fps": 30, "duration": 1.0 },
+            "assets": {},
+            "tracks": []
+        }))
+        .expect("test spec must deserialize")
+    }
+
+    #[test]
+    fn ffmpeg_args_include_encode_settings() {
+        let spec = minimal_spec(serde_json::json!({
+            "path": "out.mp4",
+            "encode": { "crf": 28, "preset": "slow", "max_bitrate": "12M" }
+        }));
+        let args = build_ffmpeg_args(&spec, &[], "out.mp4");
+        let value_after = |flag: &str| {
+            args.iter().position(|a| a == flag).map(|i| args[i + 1].as_str())
+        };
+        assert_eq!(value_after("-crf"), Some("28"));
+        assert_eq!(value_after("-preset"), Some("slow"));
+        assert_eq!(value_after("-maxrate"), Some("12000000"));
+        assert_eq!(value_after("-bufsize"), Some("24000000"));
+    }
+
+    #[test]
+    fn ffmpeg_args_default_to_no_rate_control() {
+        let spec = minimal_spec(serde_json::json!("out.mp4"));
+        let args = build_ffmpeg_args(&spec, &[], "out.mp4");
+        for flag in ["-crf", "-preset", "-maxrate", "-bufsize"] {
+            assert!(!args.iter().any(|a| a == flag), "unexpected {flag} in default args");
+        }
     }
 
     #[test]

@@ -278,6 +278,15 @@ fn run_once(opts: Opts, mut render_options: RenderOptions) {
     });
 
     for (path, val) in &overrides {
+        // An `output` override should replace only the destination: when the
+        // spec uses the object form, retargeting `output.path` keeps its
+        // `credentials` and `encode` settings intact instead of silently
+        // dropping them with the rest of the object.
+        let path = if path == "output" && spec_value.get("output").is_some_and(|o| o.is_object()) {
+            "output.path"
+        } else {
+            path.as_str()
+        };
         if let Err(e) = pipeline::apply_override(&mut spec_value, path, val) {
             eprintln!("Error applying override ({} = {}): {}", path, val, e);
             std::process::exit(1);

@@ -138,8 +138,14 @@ fn build_output(node: &KdlNode) -> Result<Value, String> {
             return Ok(Value::String(path.to_string()));
         }
     }
-    // `output { path "…"; credentials { key "…"; secret "…"; region "…" } }`
+    // `output { path "…"; credentials { key "…"; secret "…"; region "…" };
+    //           encode crf=28 preset="slow" max_bitrate="12M" }`
+    // A bare string arg combined with a block (`output "out.mp4" { encode … }`)
+    // is also accepted: the arg supplies the path.
     let mut m = Map::new();
+    if let Some(path) = first_string_arg(node) {
+        m.insert("path".into(), Value::String(path.to_string()));
+    }
     if let Some(children) = node.children() {
         for c in children.nodes() {
             match c.name().value() {
@@ -161,6 +167,13 @@ fn build_output(node: &KdlNode) -> Result<Value, String> {
                         cred.insert(k.to_string(), value_to_json(v.value()));
                     }
                     m.insert("credentials".into(), Value::Object(cred));
+                }
+                "encode" => {
+                    let mut enc = Map::new();
+                    for (k, v) in properties(c) {
+                        enc.insert(k.to_string(), value_to_json(v.value()));
+                    }
+                    m.insert("encode".into(), Value::Object(enc));
                 }
                 other => return Err(format!("unknown `output` child `{other}`")),
             }
@@ -970,6 +983,26 @@ mod tests {
         let t1 = &track["transitions"][1];
         assert_eq!(t1["params"]["gap_size"], 0.12);
         assert_valid(src);
+    }
+
+    #[test]
+    fn output_encode_block() {
+        let src = r##"
+            composition width=16 height=16 fps=30 duration=1.0
+            output "out.mp4" {
+                encode crf=28 preset="slow" max_bitrate="12M"
+            }
+            track "t" {
+                solid "s" 1.0 color="#000000"
+            }
+        "##;
+        let v = transpile(src);
+        assert_eq!(v["output"]["path"], "out.mp4");
+        assert_eq!(v["output"]["encode"]["crf"], 28);
+        assert_eq!(v["output"]["encode"]["preset"], "slow");
+        assert_eq!(v["output"]["encode"]["max_bitrate"], "12M");
+        let spec = assert_valid(src);
+        assert!(spec.validate_references().is_ok());
     }
 
     #[test]

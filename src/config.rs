@@ -118,6 +118,7 @@ pub enum OutputConfig {
     Detailed {
         path: String,
         credentials: Option<OutputCredentials>,
+        encode: Option<EncodeConfig>,
     },
 }
 
@@ -138,6 +139,13 @@ impl OutputConfig {
         match self {
             OutputConfig::Simple(_) => None,
             OutputConfig::Detailed { credentials, .. } => credentials.as_ref(),
+        }
+    }
+
+    pub fn encode(&self) -> Option<&EncodeConfig> {
+        match self {
+            OutputConfig::Simple(_) => None,
+            OutputConfig::Detailed { encode, .. } => encode.as_ref(),
         }
     }
 
@@ -173,6 +181,67 @@ pub struct OutputCredentials {
     pub key: Option<String>,
     pub secret: Option<String>,
     pub region: Option<String>,
+}
+
+/// H.264 encode settings for `.mp4` output. Every field is optional; absent
+/// fields keep x264's defaults (CRF 23, preset "medium", no bitrate cap).
+/// Ignored for still-image output.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct EncodeConfig {
+    /// x264 Constant Rate Factor: 0 (lossless) – 51 (worst), default 23.
+    pub crf: Option<u8>,
+    /// x264 speed/compression preset (`ultrafast` … `veryslow`, `placebo`).
+    pub preset: Option<String>,
+    /// Peak-bitrate cap, e.g. `"12M"` or `"8000k"`; a bare number is bits/s.
+    /// Becomes ffmpeg `-maxrate` with a 2× `-bufsize` VBV window.
+    pub max_bitrate: Option<String>,
+}
+
+const X264_PRESETS: [&str; 10] = [
+    "ultrafast", "superfast", "veryfast", "faster", "fast",
+    "medium", "slow", "slower", "veryslow", "placebo",
+];
+
+impl EncodeConfig {
+    fn collect_errors(&self, errors: &mut Vec<String>) {
+        if let Some(crf) = self.crf {
+            if crf > 51 {
+                errors.push(format!("output encode: crf must be 0–51, got {crf}"));
+            }
+        }
+        if let Some(preset) = &self.preset {
+            if !X264_PRESETS.contains(&preset.as_str()) {
+                errors.push(format!(
+                    "output encode: unknown preset '{preset}' (expected one of: {})",
+                    X264_PRESETS.join(", ")
+                ));
+            }
+        }
+        if let Some(rate) = &self.max_bitrate {
+            if parse_bitrate(rate).is_none() {
+                errors.push(format!(
+                    "output encode: max_bitrate '{rate}' is not a bitrate (expected e.g. \"12M\", \"8000k\", or bits/s)"
+                ));
+            }
+        }
+    }
+}
+
+/// Parses a bitrate string into bits per second: a number with an optional
+/// `k`/`K` (×1 000) or `m`/`M` (×1 000 000) suffix. Returns `None` for
+/// anything unparseable or non-positive.
+pub fn parse_bitrate(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num, mult) = match s.char_indices().last()? {
+        (i, 'k') | (i, 'K') => (&s[..i], 1_000u64),
+        (i, 'm') | (i, 'M') => (&s[..i], 1_000_000),
+        _ => (s, 1),
+    };
+    let v: f64 = num.parse().ok()?;
+    if !v.is_finite() || v <= 0.0 {
+        return None;
+    }
+    Some((v * mult as f64) as u64)
 }
 
 /// Root specification for a render job, containing composition settings,
@@ -558,12 +627,17 @@ fn read_effect_float(effect: &Effect, key: &str, clip_time: f32, duration: f32, 
 
 impl RenderSpec {
     /// Validates every cross-reference in the spec — clip → asset, transition
-    /// → clip, effect/clip → preset, text → font asset — and reports all
-    /// broken references at once, so a bad spec fails fast with a complete
-    /// list instead of silently rendering wrong output (missing media becomes
-    /// transparent, missing presets/fonts/audio are dropped).
+    /// → clip, effect/clip → preset, text → font asset — plus the output's
+    /// encode settings, and reports all problems at once, so a bad spec fails
+    /// fast with a complete list instead of silently rendering wrong output
+    /// (missing media becomes transparent, missing presets/fonts/audio are
+    /// dropped).
     pub fn validate_references(&self) -> Result<(), String> {
         let mut errors = Vec::new();
+
+        if let Some(encode) = self.output.encode() {
+            encode.collect_errors(&mut errors);
+        }
 
         for track in &self.tracks {
             let clip_ids: std::collections::HashSet<&str> =
@@ -2032,5 +2106,54 @@ mod validation_tests {
         json["presets"] = serde_json::Value::Array(presets);
         let err = spec_from(json).validate_references().unwrap_err();
         assert!(err.contains("preset nesting deeper than 5"), "{err}");
+    }
+
+    fn spec_with_encode(encode: serde_json::Value) -> RenderSpec {
+        let mut json = base_spec(serde_json::json!([]));
+        json["output"] = serde_json::json!({ "path": "out.mp4", "encode": encode });
+        spec_from(json)
+    }
+
+    #[test]
+    fn valid_encode_settings_pass() {
+        let spec = spec_with_encode(serde_json::json!({
+            "crf": 28, "preset": "slow", "max_bitrate": "12M"
+        }));
+        assert!(spec.validate_references().is_ok());
+        let enc = spec.output.encode().unwrap();
+        assert_eq!(enc.crf, Some(28));
+        assert_eq!(enc.preset.as_deref(), Some("slow"));
+    }
+
+    #[test]
+    fn encode_crf_out_of_range_fails() {
+        let spec = spec_with_encode(serde_json::json!({ "crf": 60 }));
+        let err = spec.validate_references().unwrap_err();
+        assert!(err.contains("crf must be 0–51"), "{err}");
+    }
+
+    #[test]
+    fn encode_unknown_preset_fails() {
+        let spec = spec_with_encode(serde_json::json!({ "preset": "warp" }));
+        let err = spec.validate_references().unwrap_err();
+        assert!(err.contains("unknown preset 'warp'"), "{err}");
+    }
+
+    #[test]
+    fn encode_bad_max_bitrate_fails() {
+        let spec = spec_with_encode(serde_json::json!({ "max_bitrate": "fast" }));
+        let err = spec.validate_references().unwrap_err();
+        assert!(err.contains("'fast' is not a bitrate"), "{err}");
+    }
+
+    #[test]
+    fn bitrate_parsing_units() {
+        assert_eq!(parse_bitrate("8000k"), Some(8_000_000));
+        assert_eq!(parse_bitrate("12M"), Some(12_000_000));
+        assert_eq!(parse_bitrate("1.5M"), Some(1_500_000));
+        assert_eq!(parse_bitrate("250000"), Some(250_000));
+        assert_eq!(parse_bitrate("fast"), None);
+        assert_eq!(parse_bitrate("-5M"), None);
+        assert_eq!(parse_bitrate(""), None);
     }
 }

@@ -129,6 +129,7 @@ spec are first tried as-is, then resolved relative to `library/` (with
 | :--- | :--- | :--- | :--- |
 | `path` | string | yes | Destination path or URL. |
 | `credentials` | object | no | `{ "key", "secret", "region" }`, all optional. Used for `s3://` / `gs://` / `mux://` uploads; CLI credential flags act as fallbacks. For `mux://`, `key` is the Mux token ID and `secret` is the Mux token secret. |
+| `encode` | [Encode](#encode-settings) | no | H.264 encode settings for video output. Ignored for stills. |
 
 The output **target** is chosen by the scheme of the path:
 
@@ -142,6 +143,30 @@ The output **format** is chosen by the path's file extension, ignoring any query
 string: `.mp4` produces a video; any other extension (`.png`, `.jpg`) produces a
 single still rendered at timeline `t = 0`. The `mux://` scheme always implies a
 video (Mux does not ingest stills).
+
+#### Encode settings
+
+For video output, the optional `encode` object tunes the H.264 encode. Every
+field is optional; absent fields keep x264's defaults (CRF 23, preset
+`medium`, no bitrate cap).
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `crf` | int | no | x264 Constant Rate Factor, `0` (lossless) – `51` (worst). Higher means a smaller file at lower quality; 23 is the default, 28 is a reasonable "smaller intermediate" choice. |
+| `preset` | string | no | x264 speed/compression trade-off: `ultrafast`, `superfast`, `veryfast`, `faster`, `fast`, `medium`, `slow`, `slower`, `veryslow`, or `placebo`. Slower presets compress better at the same quality. |
+| `max_bitrate` | string | no | Peak-bitrate cap, e.g. `"12M"` or `"8000k"` (a bare number is bits/s). Applied as ffmpeg `-maxrate` with a 2× `-bufsize` VBV window; quality degrades as needed to stay under the cap. |
+
+```json
+"output": { "path": "out.mp4", "encode": { "crf": 28, "max_bitrate": "12M" } }
+```
+
+Per-frame stochastic effects — `film_grain`, heavy `noise` — re-randomize every
+frame, which defeats H.264 inter-frame prediction and can push the default
+encode to tens of Mbps (a 1080p render can balloon from tens of MB to
+gigabytes). The engine warns after the encode when the effective bitrate is far
+above what the resolution and frame rate normally need. For `mux://` output the
+size only costs upload time (Mux re-encodes for delivery); for direct `.mp4`
+files, cap it with `crf` and/or `max_bitrate`.
 
 ### 3.3 Composition
 
@@ -498,7 +523,10 @@ effect `type` (or as a `shader` asset), and pass parameters per the contract in
   straight alpha.
 * **Video** (`.mp4`) — every frame piped to FFmpeg and encoded as H.264
   (`yuv420p`) with AAC audio. Semi-transparent pixels are flattened onto black
-  before encoding.
+  before encoding. Rate control is tunable via the output's
+  [`encode` settings](#encode-settings); after the encode the engine logs the
+  file size and effective bitrate, and warns when the bitrate is anomalously
+  high for the resolution.
 
 Remote destinations (§3.2) render to a temporary file first, then upload.
 
