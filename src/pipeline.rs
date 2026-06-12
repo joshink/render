@@ -930,8 +930,11 @@ fn build_ffmpeg_args(
         if audio_clips.len() == 1 {
             let (_, start, duration, trim_start) = audio_clips[0];
             let start_ms = (start * 1000.0).round() as u32;
+            // aresample=async=1 rebases the post-adelay timestamps: a stream whose
+            // leading silence is synthesized by adelay otherwise carries a PTS gap
+            // the encoder/muxer can reject as non-monotonic. See the multi-clip arm.
             filter_complex = format!(
-                "[1:a]atrim={:.3}:{:.3},asetpts=PTS-STARTPTS,adelay={}|{}[aout]",
+                "[1:a]atrim={:.3}:{:.3},asetpts=PTS-STARTPTS,adelay={}|{},aresample=async=1[aout]",
                 trim_start, trim_start + duration, start_ms, start_ms
             );
         } else {
@@ -949,7 +952,15 @@ fn build_ffmpeg_args(
             // normalize=0 keeps each input at unity gain. Without it, amix
             // divides every input's volume by the number of inputs, so mixing
             // N clips would silently attenuate each to 1/N of its level.
-            filter_complex.push_str(&format!("amix=inputs={}:normalize=0[aout]", audio_clips.len()));
+            //
+            // aresample=async=1 then rewrites the mix's output timestamps. amix of
+            // adelay-shifted inputs (the common case here: sequential narration
+            // clips each delayed to its absolute timeline start) emits a leading
+            // run of packets with garbage (~i64::MAX) DTS, which the mp4/aac muxer
+            // rejects as "non monotonically increasing dts" and aborts the encode —
+            // surfacing upstream as a broken pipe on the raw-frame writer. The
+            // resample regenerates a clean, monotonic PTS without moving any clip.
+            filter_complex.push_str(&format!("amix=inputs={}:normalize=0,aresample=async=1[aout]", audio_clips.len()));
         }
 
         ffmpeg_args.push("-filter_complex".to_string());
