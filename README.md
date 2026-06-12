@@ -10,7 +10,7 @@ runs on the GPU through WebGPU (`wgpu`) and WGSL compute shaders.
 > [!IMPORTANT]
 > This repository was **vibe-coded using Gemini and Claude** as a
 > high-performance proof-of-concept and educational reference. It is **not**
-> intended for production use. See the [disclaimer](#-disclaimer).
+> intended for production use. See the [disclaimer](#disclaimer).
 
 ---
 
@@ -21,8 +21,7 @@ runs on the GPU through WebGPU (`wgpu`) and WGSL compute shaders.
 - [The Input File](#the-input-file)
 - [Features](#features)
 - [Library Resolution](#library-resolution)
-- [Building for AI Agents](#building-for-ai-agents)
-- [Credits](#credits) · [License](#license) · [Disclaimer](#-disclaimer)
+- [Credits](#credits) · [License](#license) · [Disclaimer](#disclaimer)
 
 ---
 
@@ -297,7 +296,7 @@ enter "rise" granularity="letter" delay=0.05 dur=0.6 {
 }
 ```
 
-### 🎚️ Dynamic expressions
+### 🧮 Dynamic expressions
 
 Any numeric property accepts a math expression evaluated per frame, with
 variables `time`, `clip_time`, `clip.duration`, `comp.width`, and `comp.height`,
@@ -407,7 +406,7 @@ Several effect and transition shaders were adapted from or inspired by
 
 MIT — see [LICENSE](./LICENSE).
 
-## ⚖️ Disclaimer
+## Disclaimer
 
 This repository is **for educational purposes only**: a proof-of-concept for
 headless GPU video composition. It is not optimized or audited for production
