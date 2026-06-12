@@ -38,7 +38,7 @@ Normative schema: `SPEC.md`. KDL front-end: `KDL.md`. Example specs: `tests/fixt
 }
 ```
 
-(A `text` clip needs a `font` asset, e.g. `"title": { "type": "font", "provider": "file", "path": "fonts/Inter-VF.ttf" }` — the bundled font lives in `library/fonts/`.)
+(A `text` clip needs a `font` asset, e.g. `"title": { "type": "font", "path": "fonts/Inter-VF.ttf" }` — the bundled font lives in `library/fonts/`; `path` may also be an `http(s)://` URL.)
 
 Clip types: `media`, `solid`, `text`, `effect`. Any numeric property accepts a constant, a keyframe array, or `{ "expression": "..." }` with vars `time`, `clip_time`, `clip.duration`, `comp.width`, `comp.height` and fns `sin cos tan abs sqrt pow min max clamp`.
 

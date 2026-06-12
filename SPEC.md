@@ -163,7 +163,7 @@ discriminator.
 | `video` | `path` | Currently sampled as a still image for the visual track; its audio is usable via audio tracks. |
 | `audio` | `path` | Audio source for audio tracks. |
 | `shader` | `path` | A `.wgsl` file compiled into a custom effect/transition pipeline keyed by the asset id. |
-| `font` | `provider`, `path` | `provider` is one of `"file"`, `"system"`, `"url"`. |
+| `font` | `path` | A `.ttf`/`.otf` file (local path or URL). |
 
 Any `path` beginning with `http://` or `https://` is downloaded and cached to a
 temporary file before use, for every asset type.
@@ -557,7 +557,7 @@ second input texture and use `TransitionEngineParams`).
   "assets": {
     "ocean_video":    { "type": "video", "path": "assets/ocean.mp4" },
     "watermark_logo": { "type": "image", "path": "assets/logo.png" },
-    "title_font":     { "type": "font", "provider": "file", "path": "library/fonts/Inter-VF.ttf" }
+    "title_font":     { "type": "font", "path": "library/fonts/Inter-VF.ttf" }
   },
   "presets": [
     {

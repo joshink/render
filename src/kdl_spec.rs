@@ -1013,7 +1013,7 @@ mod tests {
         let src = r##"
             composition width=1920 height=1080 fps=30 duration=5.0
             output "out.mp4"
-            font "f" path="f.ttf" provider="local"
+            font "f" path="f.ttf"
             image "logo" path="logo.png"
             track "t" {
                 media "m" 5.0 asset="logo" {
@@ -1043,7 +1043,7 @@ mod tests {
         let src = r##"
             composition width=1080 height=1920 fps=30 duration=4.0
             output "out.mp4"
-            font "inter" path="Inter.ttf" provider="local"
+            font "inter" path="Inter.ttf"
             def "reveal_in" {
                 enter "reveal" granularity="letter" delay=0.0 dur=0.2 easing="linear" {
                     from opacity=0.0

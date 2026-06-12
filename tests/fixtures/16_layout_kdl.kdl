@@ -3,8 +3,8 @@
 composition width=1080 height=1920 fps=30 duration=4.0
 output "tests/fixtures/outputs/16_layout_kdl.mp4"
 
-font "inter"        path="library/fonts/Inter-VF.ttf" provider="local"
-font "inter_italic" path="library/fonts/Inter-VF.ttf" provider="local"
+font "inter"        path="library/fonts/Inter-VF.ttf"
+font "inter_italic" path="library/fonts/Inter-VF.ttf"
 
 // Define the entrance once, reuse it on every clip.
 def "reveal_in" {

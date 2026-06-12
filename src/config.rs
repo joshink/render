@@ -229,7 +229,7 @@ pub enum Asset {
     #[serde(rename = "lut")]
     Lut { path: String },
     #[serde(rename = "font")]
-    Font { provider: String, path: String },
+    Font { path: String },
 }
 
 /// A visual track containing an ordered sequence of clips and optional transitions.
@@ -1875,7 +1875,7 @@ mod validation_tests {
             "assets": {
                 "img": { "type": "image", "path": "input.jpg" },
                 "song": { "type": "audio", "path": "song.mp3" },
-                "ttf": { "type": "font", "provider": "file", "path": "font.ttf" }
+                "ttf": { "type": "font", "path": "font.ttf" }
             },
             "tracks": tracks
         })

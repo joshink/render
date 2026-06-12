@@ -45,7 +45,7 @@ composition width=800 height=800 fps=30 duration=8.0   // or: comp 800 800 30 8.
 output "out.mp4"                                        // or an { } block, below
 
 image "bg"  path="bg.jpg"                               // asset; node name = type
-font  "ui"  path="Inter.ttf" provider="local"
+font  "ui"  path="Inter.ttf"
 // also: video, audio, shader, lut  — or  asset "x" type="image" path="…"
 
 track "main" {

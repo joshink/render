@@ -10,12 +10,10 @@
   "assets": {
     "inter": {
       "type": "font",
-      "provider": "local",
       "path": "library/fonts/Inter-VF.ttf"
     },
     "inter_italic": {
       "type": "font",
-      "provider": "local",
       "path": "library/fonts/Inter-VF.ttf"
     }
   },
